@@ -18,6 +18,65 @@ global.WebSocket = WebSocket;
 // Navigator is read-only in newer Node versions and already exists
 // global.navigator = dom.window.navigator;
 
+/**
+ * marked renders GFM task lists as plain <ul><li><input type="checkbox">.
+ * Rewrite them into the data-type markup the Tiptap TaskList/TaskItem
+ * extensions parse, so checkboxes survive the HTML -> ProseMirror step.
+ */
+export function markTaskLists(html: string): string {
+  const body = new JSDOM(`<body>${html}</body>`).window.document.body;
+
+  // The checkbox is either the first child of the li (tight list) or the
+  // first child of its leading <p> (loose list).
+  const leadingCheckbox = (li: Element): Element | null => {
+    let first = li.firstElementChild;
+    if (first?.tagName === "P") first = first.firstElementChild;
+    if (
+      first?.tagName === "INPUT" &&
+      first.getAttribute("type") === "checkbox" &&
+      first.parentElement?.firstChild === first
+    ) {
+      return first;
+    }
+    return null;
+  };
+
+  for (const ul of Array.from(body.querySelectorAll("ul"))) {
+    const items = Array.from(ul.children).filter((el) => el.tagName === "LI");
+    if (items.length === 0) continue;
+
+    // A taskList may only hold taskItems, so a list mixing checkbox and plain
+    // items stays a bullet list; keep the checkbox state as literal text
+    // rather than letting the parser silently drop the <input>.
+    if (!items.every(leadingCheckbox)) {
+      for (const li of items) {
+        const input = leadingCheckbox(li);
+        if (input) {
+          input.replaceWith(input.hasAttribute("checked") ? "[x]" : "[ ]");
+        }
+      }
+      continue;
+    }
+
+    ul.setAttribute("data-type", "taskList");
+    for (const li of items) {
+      const input = leadingCheckbox(li)!;
+      li.setAttribute("data-type", "taskItem");
+      li.setAttribute(
+        "data-checked",
+        input.hasAttribute("checked") ? "true" : "false",
+      );
+      const next = input.nextSibling;
+      input.remove();
+      if (next?.nodeType === 3) {
+        next.textContent = next.textContent!.replace(/^\s+/, "");
+      }
+    }
+  }
+
+  return body.innerHTML;
+}
+
 export async function updatePageContentRealtime(
   pageId: string,
   markdownContent: string,
@@ -30,7 +89,7 @@ export async function updatePageContentRealtime(
   );
 
   // 1. Convert Markdown to HTML
-  const html = await marked.parse(markdownContent);
+  const html = markTaskLists(await marked.parse(markdownContent));
 
   // 2. Convert HTML to ProseMirror JSON
   const tiptapJson = generateJSON(html, tiptapExtensions);

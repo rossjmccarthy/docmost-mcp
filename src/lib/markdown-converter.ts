@@ -122,7 +122,7 @@ export function convertProseMirrorToMarkdown(content: any): string {
         return `📺 [YouTube Video](${youtubeUrl})`;
 
       case "table":
-        return nodeContent.map(processNode).join("\n");
+        return processTable(nodeContent);
 
       case "tableRow":
         return "| " + nodeContent.map(processNode).join(" | ") + " |";
@@ -183,22 +183,49 @@ export function convertProseMirrorToMarkdown(content: any): string {
     }
   };
 
+  // Indent every line after the marker so nested blocks (sub-lists, extra
+  // paragraphs) stay inside the list item.
   const processListItem = (item: any, prefix: string): string => {
     const itemContent = item.content || [];
-    const lines = itemContent.map(processNode);
-    return lines
+    const indent = " ".repeat(prefix.length + 1);
+    return itemContent
+      .map(processNode)
+      .join("\n")
+      .split("\n")
       .map((line: string, i: number) =>
-        i === 0 ? `${prefix} ${line}` : `  ${line}`,
+        i === 0 ? `${prefix} ${line}` : line ? `${indent}${line}` : line,
       )
       .join("\n");
+  };
+
+  // GFM table cells are single-line: escape pipes and turn line breaks
+  // (hardBreak or multiple paragraphs) into <br>.
+  const processTableCell = (cell: any): string =>
+    (cell.content || [])
+      .map(processNode)
+      .join("\n")
+      .trim()
+      .replace(/\|/g, "\\|")
+      .replace(/\r?\n/g, "<br>");
+
+  const processTable = (rows: any[]): string => {
+    const cells = rows.map((row: any) =>
+      (row.content || []).map(processTableCell),
+    );
+    if (cells.length === 0) return "";
+    const columns = Math.max(1, ...cells.map((r: string[]) => r.length));
+    const line = (r: string[]) =>
+      "| " +
+      [...r, ...Array(columns - r.length).fill("")].join(" | ") +
+      " |";
+    const separator = "|" + " --- |".repeat(columns);
+    return [line(cells[0]), separator, ...cells.slice(1).map(line)].join("\n");
   };
 
   const processTaskItem = (item: any): string => {
     const checked = item.attrs?.checked || false;
     const checkbox = checked ? "[x]" : "[ ]";
-    const itemContent = item.content || [];
-    const text = itemContent.map(processNode).join("");
-    return `- ${checkbox} ${text}`;
+    return processListItem(item, "-").replace(/^- /, `- ${checkbox} `);
   };
 
   return processNode(content).trim();

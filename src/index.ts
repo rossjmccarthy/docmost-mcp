@@ -36,6 +36,22 @@ if (!API_URL || !EMAIL || !PASSWORD) {
   process.exit(1);
 }
 
+// Docmost node types the Markdown -> ProseMirror writer has no extension for.
+const UNREBUILDABLE_NODE_TYPES = new Set([
+  "callout",
+  "details",
+  "mention",
+  "attachment",
+  "drawio",
+  "excalidraw",
+  "embed",
+  "video",
+  "youtube",
+  "mathInline",
+  "mathBlock",
+  "subpages",
+]);
+
 class DocmostClient {
   // ... [Client Implementation stays exactly the same] ...
   private client: AxiosInstance;
@@ -228,7 +244,11 @@ class DocmostClient {
     });
     const newPageId = response.data.data.id;
 
-    // 2. Move to parent if needed
+    // 2. Import derives the title from the filename (e.g. spaces become
+    // underscores), so set the exact requested title explicitly.
+    await this.client.post("/pages/update", { pageId: newPageId, title });
+
+    // 3. Move to parent if needed
     if (parentPageId) {
       await this.movePage(newPageId, parentPageId);
     }
@@ -238,18 +258,65 @@ class DocmostClient {
   }
 
   /**
-   * Update a page's content and optionally its title.
+   * Return the node types in a page's current ProseMirror JSON that the
+   * Markdown writer cannot rebuild, so overwriting would silently lose them.
+   */
+  async findUnrebuildableNodes(pageId: string): Promise<string[]> {
+    const response = await this.client.post("/pages/info", { pageId });
+    const found = new Set<string>();
+    const walk = (node: any) => {
+      if (!node) return;
+      if (UNREBUILDABLE_NODE_TYPES.has(node.type)) found.add(node.type);
+      (node.content || []).forEach(walk);
+    };
+    walk(response.data.data?.content);
+    return [...found].sort();
+  }
+
+  /**
+   * Update a page's content and/or its title.
    * Leverages WebSocket collaboration to update content without changing Page ID.
    */
-  async updatePage(pageId: string, content: string, title?: string) {
+  async updatePage(
+    pageId: string,
+    content?: string,
+    title?: string,
+    force: boolean = false,
+  ) {
     await this.ensureAuthenticated();
 
-    // 1. Update Title via REST API if provided
+    if (content === undefined && !title) {
+      throw new Error("Nothing to update: provide content and/or title.");
+    }
+
+    // 1. Refuse to overwrite content the writer cannot rebuild (before any write)
+    if (content !== undefined && !force) {
+      const unsupported = await this.findUnrebuildableNodes(pageId);
+      if (unsupported.length > 0) {
+        throw new Error(
+          `Refusing to overwrite page ${pageId}: it contains node types that ` +
+            `cannot be rebuilt from Markdown and would be lost: ` +
+            `${unsupported.join(", ")}. Edit this page in Docmost, or pass ` +
+            `force=true to overwrite anyway.`,
+        );
+      }
+    }
+
+    // 2. Update Title via REST API if provided
     if (title) {
       await this.client.post("/pages/update", { pageId, title });
     }
 
-    // 2. Update Content via WebSocket
+    if (content === undefined) {
+      return {
+        success: true,
+        modified: true,
+        message: "Page title updated successfully.",
+        pageId: pageId,
+      };
+    }
+
+    // 3. Update Content via WebSocket
     let collabToken = "";
     try {
       const baseURL = this.client.defaults.baseURL || "";
@@ -445,12 +512,28 @@ server.registerTool(
       "Update a page's content and/or title via realtime collaboration (preserves Page ID and history).",
     inputSchema: {
       pageId: z.string().describe("ID of the page to update"),
-      content: z.string().describe("New Markdown content"),
+      content: z
+        .string()
+        .optional()
+        .describe(
+          "New Markdown content (replaces the whole page). Omit to change only the title.",
+        ),
       title: z.string().optional().describe("Optional new title"),
+      force: z
+        .boolean()
+        .optional()
+        .describe(
+          "Overwrite even if the page contains blocks Markdown cannot rebuild (callouts, embeds, attachments, etc.), which will be lost.",
+        ),
     },
   },
-  async ({ pageId, content, title }) => {
-    const result = await docmostClient.updatePage(pageId, content, title);
+  async ({ pageId, content, title, force }) => {
+    const result = await docmostClient.updatePage(
+      pageId,
+      content,
+      title,
+      force,
+    );
     return jsonContent(result);
   },
 );
