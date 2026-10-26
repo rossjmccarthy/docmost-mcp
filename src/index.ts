@@ -285,6 +285,12 @@ class DocmostClient {
   ) {
     await this.ensureAuthenticated();
 
+    // Empty or whitespace-only content means "not supplied" (title-only
+    // rename), never "blank the page".
+    if (content !== undefined && content.trim() === "") {
+      content = undefined;
+    }
+
     if (content === undefined && !title) {
       throw new Error("Nothing to update: provide content and/or title.");
     }
@@ -509,7 +515,11 @@ server.registerTool(
   "update_page",
   {
     description:
-      "Update a page's content and/or title via realtime collaboration (preserves Page ID and history).",
+      "Update a page's content and/or title via realtime collaboration (preserves Page ID and history). " +
+      "To rename only, pass title and omit content (empty content is treated as omitted). " +
+      "Content replaces the whole page; if the page contains blocks Markdown cannot rebuild " +
+      "(callout, details, mention, attachment, drawio, excalidraw, embed, video, youtube, " +
+      "mathInline, mathBlock, subpages) the update is refused unless force=true, which discards them.",
     inputSchema: {
       pageId: z.string().describe("ID of the page to update"),
       content: z
