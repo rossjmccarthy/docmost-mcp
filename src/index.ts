@@ -164,6 +164,31 @@ class DocmostClient {
     return allItems;
   }
 
+  /**
+   * One page of a cursor-paginated list endpoint, for tools whose results
+   * can be long (history, trash, comments). Pass the returned nextCursor
+   * back to get the next page.
+   */
+  async listOnePage(
+    endpoint: string,
+    payload: Record<string, unknown>,
+    cursor?: string,
+    limit = 50,
+  ): Promise<{ items: any[]; nextCursor: string | null }> {
+    await this.ensureAuthenticated();
+    const response = await this.client.post(endpoint, {
+      ...payload,
+      limit: Math.max(1, Math.min(100, limit)),
+      ...(cursor ? { cursor } : {}),
+    });
+    const data = response.data?.data ?? response.data;
+    const meta = data?.meta;
+    return {
+      items: data?.items || [],
+      nextCursor: meta?.hasNextPage && meta?.nextCursor ? meta.nextCursor : null,
+    };
+  }
+
   async getWorkspace() {
     await this.ensureAuthenticated();
     const response = await this.client.post("/workspace/info", {});
@@ -187,6 +212,18 @@ class DocmostClient {
     const payload = spaceId ? { spaceId } : {};
     const pages = await this.paginateAll("/pages/recent", payload);
     return pages.map((page) => filterPage(page));
+  }
+
+  /** Direct children of a page, or the root pages of a space, in sidebar order. */
+  async listChildPages(opts: { spaceId?: string; pageId?: string }) {
+    if (!opts.spaceId && !opts.pageId) {
+      throw new Error(
+        "Pass pageId to list a page's children, or spaceId to list the pages at the root of a space.",
+      );
+    }
+    const payload = opts.pageId ? { pageId: opts.pageId } : { spaceId: opts.spaceId };
+    const pages = await this.paginateAll("/pages/sidebar-pages", payload);
+    return pages.map((p: any) => ({ id: p.id, title: p.title, hasChildren: !!p.hasChildren }));
   }
 
   async listSidebarPages(spaceId: string, pageId: string) {
@@ -860,6 +897,23 @@ server.registerTool(
     });
     return jsonContent(result);
   },
+);
+
+// Tool: list_child_pages
+server.registerTool(
+  "list_child_pages",
+  {
+    description:
+      "List the direct children of a page (pass pageId), or the top-level pages " +
+      "of a space (pass spaceId only), in sidebar order, with whether each has " +
+      "children of its own. Read-only. Use it to walk the page tree; list_pages " +
+      "is a flat recently-updated list instead.",
+    inputSchema: {
+      pageId: z.string().optional().describe("Parent page ID"),
+      spaceId: z.string().optional().describe("Space ID, to list its root pages (ignored if pageId is set)"),
+    },
+  },
+  async ({ pageId, spaceId }) => jsonContent(await docmostClient.listChildPages({ pageId, spaceId })),
 );
 
 async function run() {

@@ -236,6 +236,75 @@ for (const [label, opts] of [["restore write fails", { failJson: true }], ["new 
   fake.close();
 }
 
+// Fake Docmost for the Phase 2 tools: routes maps an API path to a function
+// of the request body returning the response data (or throwing to answer
+// 400). Every request is recorded as { url, body }.
+async function fakeApi(routes) {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/api/auth/login") {
+        res.setHeader("set-cookie", "authToken=t; Path=/");
+        return res.end("{}");
+      }
+      const parsed = JSON.parse(body || "{}");
+      const path = req.url.replace(/^\/api/, "");
+      requests.push({ url: path, body: parsed });
+      const route = routes[path];
+      if (!route) {
+        res.statusCode = 404;
+        return res.end(JSON.stringify({ message: `no route ${path}` }));
+      }
+      try {
+        res.end(JSON.stringify({ success: true, data: route(parsed) }));
+      } catch (err) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ message: err.message }));
+      }
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${server.address().port}/api`, requests, close: () => server.close() };
+}
+
+const toolServer = async (fake, extraEnv = {}) =>
+  mcpServer({
+    DOCMOST_API_URL: fake.url, DOCMOST_EMAIL: "x", DOCMOST_PASSWORD: "x",
+    DOCMOST_BACKUP_DIR: await mkdtemp(join(tmpdir(), "mcp-unit-")), ...extraEnv,
+  });
+
+// list_child_pages follows the cursor to the end and needs pageId or spaceId.
+{
+  const fake = await fakeApi({
+    "/pages/sidebar-pages": (b) =>
+      b.cursor
+        ? { items: [{ id: "c3", title: "Three", hasChildren: false }], meta: { hasNextPage: false } }
+        : { items: [{ id: "c1", title: "One", hasChildren: true, position: "a0" }, { id: "c2", title: "Two" }], meta: { hasNextPage: true, nextCursor: "n1" } },
+  });
+  const srv = await toolServer(fake);
+  const r = await srv.call("list_child_pages", { pageId });
+  const none = await srv.call("list_child_pages", {});
+  srv.close();
+  fake.close();
+  await check("list_child_pages returns every page across cursors, trimmed", () => {
+    assert.equal(r.ok, true, r.text);
+    assert.deepEqual(r.json, [
+      { id: "c1", title: "One", hasChildren: true },
+      { id: "c2", title: "Two", hasChildren: false },
+      { id: "c3", title: "Three", hasChildren: false },
+    ]);
+    assert.deepEqual(fake.requests.map((q) => q.body.cursor), [undefined, "n1"]);
+    assert.equal(fake.requests[0].body.pageId, pageId);
+  });
+  await check("list_child_pages without pageId or spaceId fails with guidance", () => {
+    assert.equal(none.ok, false);
+    assert.match(none.text, /Pass pageId .* or spaceId/);
+  });
+}
+
 // Backup folders are owner-only, and the startup sweep expires old backups
 // across all pages, including a page's newest once it is past the limit.
 {
