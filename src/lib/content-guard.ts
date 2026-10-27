@@ -36,7 +36,9 @@ const CELL: TypeRule = {
 };
 
 export const ALLOWED_NODES: Record<string, TypeRule> = {
-  doc: {},
+  // A page created from Markdown gets dir="auto" on the doc itself; a
+  // rewrite drops it, which is the same default.
+  doc: BLOCK,
   text: {},
   paragraph: TEXT_BLOCK,
   heading: { preserved: ["level"], defaults: TEXT_BLOCK.defaults },

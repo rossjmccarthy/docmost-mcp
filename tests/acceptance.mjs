@@ -87,6 +87,11 @@ try {
   check("title-only rename keeps content and title is exact", r.ok && afterRename.title === renamed && JSON.stringify(afterRename.content) === JSON.stringify(before), r.ok ? "" : r.text);
   check("rename took a backup", (await backupsFor(newId)).length === 1);
 
+  // A page made with create_page can be replaced without force: nothing the
+  // Markdown create adds may trip the guard.
+  const cr = await tool.call("update_page", { pageId: newId, content: "## Something\n\nReplaced body.", operation: "replace" });
+  check("page made by create_page can be replaced without force", cr.ok, cr.text.slice(0, 140));
+
   // A page created without content is stored as content: null; it is still
   // an ordinary page that can be renamed (and the backup records null).
   const empty = await tool.call("create_page", { title: `${PREFIX} empty page`, content: "", spaceId: TEST_SPACE_ID });

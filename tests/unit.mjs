@@ -43,6 +43,13 @@ for (const name of ALLOWED) {
   await check(`fixture exists: ${name}`, () => assert.ok(fixtures.some(([n]) => n === name)));
 }
 
+// Docmost's Markdown create puts dir="auto" on the doc node; that must not
+// block a later replace (create_page followed by update_page).
+await check("guard allows doc.dir=auto from a Markdown create", () =>
+  assert.equal(isLossy(inspectContent({ type: "doc", attrs: { dir: "auto" }, content: [{ type: "paragraph", content: [{ type: "text", text: "x" }] }] })), false));
+await check("guard still blocks a non-default doc.dir", () =>
+  assert.equal(isLossy(inspectContent({ type: "doc", attrs: { dir: "rtl" }, content: [] })), true));
+
 // The guard fails closed on anything that is not a ProseMirror document,
 // and on type names that exist on Object.prototype.
 for (const [label, doc] of [
