@@ -13,7 +13,8 @@
     "inspector": "npx @modelcontextprotocol/inspector --config mcp_config.json",
     "test:roundtrip": "npm run build && node tests/roundtrip.mjs",
     "test": "npm run build && node tests/unit.mjs",
-    "test:acceptance": "npm run build && node tests/acceptance.mjs"
+    "test:acceptance": "npm run build && node tests/acceptance.mjs",
+    "test:acceptance2": "npm run build && node tests/acceptance-phase2.mjs"
   },
   "keywords": [
     "mcp",

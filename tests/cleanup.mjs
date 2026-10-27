@@ -1,5 +1,6 @@
 // Permanently delete leftover harness pages: only pages in the test space
-// (and its trash) whose title starts with "MCPTEST ". Nothing else is touched.
+// (and its trash) whose title starts with "MCPTEST " (or "Copy of MCPTEST ",
+// from duplicate_page). Nothing else is touched.
 // Usage: node tests/cleanup.mjs
 import { TEST_SPACE_ID, PREFIX, apiClient } from "./lib.mjs";
 
@@ -17,8 +18,10 @@ async function all(path, body) {
   return items;
 }
 
+// duplicate_page names a same-space copy "Copy of <title>".
 const isTestPage = (p) =>
-  p.spaceId === TEST_SPACE_ID && typeof p.title === "string" && p.title.startsWith(`${PREFIX} `);
+  p.spaceId === TEST_SPACE_ID && typeof p.title === "string" &&
+  (p.title.startsWith(`${PREFIX} `) || p.title.startsWith(`Copy of ${PREFIX} `));
 
 const live = await all("/pages/recent", { spaceId: TEST_SPACE_ID });
 const trashed = await all("/pages/trash", { spaceId: TEST_SPACE_ID });
