@@ -1,4 +1,4 @@
-import { mkdir, open, readdir, rename, unlink } from "fs/promises";
+import { chmod, mkdir, open, readdir, rename, rmdir, unlink } from "fs/promises";
 import { join } from "path";
 
 /**
@@ -47,10 +47,18 @@ export class BackupStore {
     return join(this.dir, pageId);
   }
 
+  /** Create (or tighten) the backup root and a page folder as owner-only. */
+  private async ensureDir(dir: string): Promise<void> {
+    await mkdir(this.dir!, { recursive: true, mode: 0o700 });
+    await chmod(this.dir!, 0o700);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await chmod(dir, 0o700);
+  }
+
   /** Write the snapshot durably. Throws if it could not be written. */
   async save(snapshot: PageSnapshot): Promise<string> {
     const dir = this.pageDir(snapshot.pageId);
-    await mkdir(dir, { recursive: true });
+    await this.ensureDir(dir);
 
     const stamp = snapshot.capturedAt.replace(/[:.]/g, "-");
     const name = `${stamp}_${snapshot.operation}.json`;
@@ -67,7 +75,7 @@ export class BackupStore {
     await rename(tmp, file);
 
     // Pruning is best effort: the new snapshot is already safe on disk.
-    await this.prune(snapshot.pageId).catch((err) =>
+    await this.prune(snapshot.pageId, true).catch((err) =>
       console.error(`Backup prune failed for ${snapshot.pageId}: ${err.message}`),
     );
     return file;
@@ -95,17 +103,65 @@ export class BackupStore {
 
   /**
    * Keep at most keepPerPage snapshots and drop those older than maxAgeDays.
-   * Only runs right after a save, so the newest snapshot always survives.
+   * After a save (keepNewest) the snapshot just written always survives.
+   * Returns how many files were removed.
    */
-  private async prune(pageId: string): Promise<void> {
+  private async prune(pageId: string, keepNewest: boolean): Promise<number> {
     const entries = await this.list(pageId);
     const cutoff = Date.now() - this.maxAgeDays * 86_400_000;
+    let removed = 0;
     for (const [i, entry] of entries.entries()) {
-      if (i === 0) continue;
+      if (i === 0 && keepNewest) continue;
       const tooMany = i >= this.keepPerPage;
-      const tooOld = Date.parse(entry.capturedAt) < cutoff;
-      if (tooMany || tooOld) await unlink(entry.file);
+      const capturedAt = Date.parse(entry.capturedAt);
+      const tooOld = !Number.isFinite(capturedAt) || capturedAt < cutoff;
+      if (tooMany || tooOld) {
+        await unlink(entry.file);
+        removed++;
+      }
     }
+    return removed;
+  }
+
+  /**
+   * Apply the retention limits to every page folder, including pages that
+   * will never be written again (deleted or no longer edited), whose backups
+   * would otherwise outlive maxAgeDays. Run at startup. A page's newest
+   * snapshot expires too once it is past the age limit.
+   */
+  async sweep(): Promise<{ pages: number; removed: number; emptied: number }> {
+    const result = { pages: 0, removed: 0, emptied: 0 };
+    if (!this.dir) return result;
+    let names: string[];
+    try {
+      names = await readdir(this.dir);
+    } catch (err: any) {
+      if (err.code === "ENOENT") return result;
+      throw err;
+    }
+    await chmod(this.dir, 0o700);
+    for (const name of names) {
+      if (!PAGE_ID.test(name)) continue;
+      const dir = join(this.dir, name);
+      let files: string[];
+      try {
+        files = await readdir(dir);
+      } catch {
+        continue; // not a folder
+      }
+      result.pages++;
+      // Leftover temp files are from interrupted writes and never complete.
+      for (const f of files.filter((f) => f.startsWith(".") && f.endsWith(".tmp"))) {
+        await unlink(join(dir, f));
+        result.removed++;
+      }
+      result.removed += await this.prune(name, false);
+      if ((await readdir(dir)).length === 0) {
+        await rmdir(dir);
+        result.emptied++;
+      }
+    }
+    return result;
   }
 }
 

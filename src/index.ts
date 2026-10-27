@@ -723,6 +723,19 @@ server.registerTool(
 );
 
 async function run() {
+  // Expire old backups, including those of pages never written again.
+  try {
+    const swept = await backups.sweep();
+    if (swept.pages) {
+      console.error(
+        `Backup sweep: ${swept.pages} page folders checked, ${swept.removed} ` +
+          `expired files removed, ${swept.emptied} empty folders removed`,
+      );
+    }
+  } catch (err: any) {
+    console.error(`Backup sweep failed: ${err.message}`);
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

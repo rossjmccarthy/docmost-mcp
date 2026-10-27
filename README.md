@@ -67,9 +67,13 @@ The design rule is that a missing feature is better than silent data loss.
 | `DOCMOST_MARKDOWN_READER` | no (`fork`) | Markdown converter for `get_page`: `fork` or `native` (Docmost's) |
 
 Backups are written as `<DOCMOST_BACKUP_DIR>/<pageId>/<timestamp>_<operation>.json`
-with mode 600. Pruning only happens right after a new backup is saved, so a
-page always keeps its most recent one. They contain full page content, so
-treat the directory as sensitive and include it in your own backups.
+with mode 600, in folders with mode 700. After each new backup the page's
+older ones are pruned to `DOCMOST_BACKUP_KEEP` and `DOCMOST_BACKUP_MAX_AGE_DAYS`,
+always keeping the one just written. At startup the server sweeps every page
+folder with the age limit alone, so backups of pages that are never written
+again (including deleted ones) also expire; the sweep can remove a page's
+last backup. They contain full page content, so treat the directory as
+sensitive and include it in your own backups.
 
 ## Usage with an MCP client
 
