@@ -147,7 +147,7 @@ for (const [label, content] of [
 // After a Markdown replace, headings whose text is unchanged get their old
 // ids back (repeated texts pair up in order) in one JSON write. Docmost
 // stores the Markdown write a little later, as the real one does.
-async function statefulDocmost(initial, converted) {
+async function statefulDocmost(initial, converted, { failJson = false, neverStore = false } = {}) {
   let content = initial;
   const writes = [];
   const server = http.createServer((req, res) => {
@@ -164,7 +164,11 @@ async function statefulDocmost(initial, converted) {
       }
       const b = JSON.parse(body || "{}");
       writes.push({ url: req.url, format: b.format, content: b.content });
-      if (req.url === "/api/pages/update" && b.format === "markdown") setTimeout(() => (content = converted), 400);
+      if (req.url === "/api/pages/update" && b.format === "json" && failJson) {
+        res.statusCode = 500;
+        return res.end(JSON.stringify({ message: "boom" }));
+      }
+      if (req.url === "/api/pages/update" && b.format === "markdown" && !neverStore) setTimeout(() => (content = converted), 400);
       if (req.url === "/api/pages/update" && b.format === "json") content = b.content;
       res.end(JSON.stringify({ success: true, data: {} }));
     });
@@ -197,6 +201,29 @@ async function statefulDocmost(initial, converted) {
   await check("append does not touch heading ids", () => {
     assert.equal(append.json.headingIds, undefined);
     assert.equal(fake.writes.length, 3);
+  });
+  srv.close();
+  fake.close();
+}
+
+// If restoring heading ids fails or times out, the content change still
+// reports success, with a warning rather than an error.
+for (const [label, opts] of [["restore write fails", { failJson: true }], ["new content never appears", { neverStore: true }]]) {
+  const h = (id, text) => ({ type: "heading", attrs: { id, level: 2 }, content: [{ type: "text", text }] });
+  const before = { type: "doc", content: [h("oldalpha", "Alpha")] };
+  const fake = await statefulDocmost(before, { type: "doc", content: [h("new1", "Alpha")] }, opts);
+  const backupDir = await mkdtemp(join(tmpdir(), "mcp-unit-"));
+  const srv = mcpServer({
+    DOCMOST_API_URL: fake.url, DOCMOST_EMAIL: "x", DOCMOST_PASSWORD: "x",
+    DOCMOST_BACKUP_DIR: backupDir, DOCMOST_HEADING_ID_TIMEOUT_MS: "1500",
+  });
+  const r = await srv.call("update_page", { pageId, content: "## Alpha", operation: "replace" });
+  await check(`${label}: replace succeeds with a warning`, () => {
+    assert.equal(r.ok, true, r.text);
+    assert.equal(r.json.success, true);
+    assert.equal(r.json.headingIds.kept, 0);
+    assert.match(r.json.warning, /Heading ids were not restored|did not appear in time/);
+    assert.equal(r.json.warning, r.json.headingIds.warning);
   });
   srv.close();
   fake.close();

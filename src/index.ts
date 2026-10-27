@@ -60,6 +60,10 @@ const MARKDOWN_READER =
 
 type ContentOperation = "replace" | "append" | "prepend";
 
+// How long update_page waits for a Markdown replace to be stored before
+// restoring heading ids.
+const HEADING_ID_TIMEOUT_MS = positiveInt(process.env.DOCMOST_HEADING_ID_TIMEOUT_MS, 15000);
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Visit every node of a ProseMirror document, depth first, in order. */
@@ -432,7 +436,10 @@ class DocmostClient {
         content === undefined
           ? "Page title updated."
           : `Page content ${operation === "replace" ? "replaced" : operation + "ed"}.`,
+      // The content change succeeded either way; a failed id restore is a
+      // warning, never an error.
       ...(headingIds ? { headingIds } : {}),
+      ...(headingIds?.warning ? { warning: headingIds.warning } : {}),
       backup: backupFile,
     };
   }
@@ -472,9 +479,9 @@ class DocmostClient {
     if (!withIds) return undefined;
 
     try {
-      const after = await this.waitForStoredChange(pageId, JSON.stringify(before));
+      const after = await this.waitForStoredChange(pageId, JSON.stringify(before), HEADING_ID_TIMEOUT_MS);
       if (!after || after.type !== "doc") {
-        return { kept: 0, of: withIds, note: "The new content did not appear in time, so heading ids were not restored." };
+        return { kept: 0, of: withIds, warning: "The new content did not appear in time, so heading ids were not restored; links to headings on this page may break." };
       }
       // Docmost does not de-duplicate ids, so never reuse one already present.
       const present = new Set<string>();
@@ -501,7 +508,7 @@ class DocmostClient {
         ...(kept < withIds ? { note: `${withIds - kept} heading(s) changed text or were removed, so their anchors changed.` } : {}),
       };
     } catch (err: any) {
-      return { kept: 0, of: withIds, note: `Heading ids were not restored: ${err.message}` };
+      return { kept: 0, of: withIds, warning: `Heading ids were not restored (${err.message}); links to headings on this page may break.` };
     }
   }
 

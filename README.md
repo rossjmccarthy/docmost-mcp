@@ -36,7 +36,9 @@ The design rule is that a missing feature is better than silent data loss.
   write; after a replace the server puts back the previous id of each
   heading whose text is unchanged (with one extra write that changes only
   ids), so links to those headings keep working. The result's `headingIds`
-  says how many were kept. Paragraph ids are not kept.
+  says how many were kept. Paragraph ids are not kept. If restoring the ids
+  fails or times out (`DOCMOST_HEADING_ID_TIMEOUT_MS`, default 15000), the
+  replace still reports success, with a `warning`.
 - **append and prepend are always safe.** They add new blocks without
   touching existing ones, so they skip the guard (and still back up).
 - **Honest reads.** `get_page` returns Markdown by default, and starts the
