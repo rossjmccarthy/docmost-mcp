@@ -391,6 +391,32 @@ const toolServer = async (fake, extraEnv = {}) =>
   });
 }
 
+// move_page_to_space backs up, moves, confirms the new space, and refuses a
+// move to the space the page is already in.
+{
+  const doc = { type: "doc", content: [] };
+  let space = "s1";
+  const fake = await fakeApi({
+    "/pages/info": () => ({ id: pageId, spaceId: space, title: "T", parentPageId: "p", content: doc }),
+    "/pages/move-to-space": (b) => { space = b.spaceId; return null; },
+  });
+  const srv = await toolServer(fake);
+  const moved = await srv.call("move_page_to_space", { pageId, spaceId: "s2" });
+  const same = await srv.call("move_page_to_space", { pageId, spaceId: "s2" });
+  srv.close();
+  fake.close();
+  await check("move_page_to_space backs up, moves and reports where it came from", () => {
+    assert.equal(moved.ok, true, moved.text);
+    assert.deepEqual(moved.json.from, { spaceId: "s1", parentPageId: "p" });
+    assert.match(moved.json.backup, /_move-to-space\.json$/);
+  });
+  await check("move_page_to_space refuses the page's own space and writes nothing", () => {
+    assert.equal(same.ok, false);
+    assert.match(same.text, /already in space s2/);
+    assert.equal(fake.requests.filter((q) => q.url === "/pages/move-to-space").length, 1);
+  });
+}
+
 // Backup folders are owner-only, and the startup sweep expires old backups
 // across all pages, including a page's newest once it is past the limit.
 {

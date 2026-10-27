@@ -335,6 +335,34 @@ class DocmostClient {
     };
   }
 
+  /**
+   * Move a page, with every page under it, to the root of another space.
+   * Only the moved page is backed up: the pages under it keep their content
+   * and their place beneath it.
+   */
+  async movePageToSpace(pageId: string, spaceId: string) {
+    const page = await this.getPageForWrite(pageId);
+    if (page.spaceId === spaceId) {
+      throw new Error(`Page ${pageId} is already in space ${spaceId}; use move_page to move it within the space.`);
+    }
+    const backupFile = await this.backupPage(page, "move-to-space");
+    await this.client.post("/pages/move-to-space", { pageId, spaceId });
+    const after = await this.getPageRaw(pageId);
+    if (after?.spaceId !== spaceId) {
+      throw new Error(`Docmost accepted the move but page ${pageId} is still in space ${after?.spaceId}. Backup: ${backupFile}`);
+    }
+    return {
+      success: true,
+      pageId,
+      message:
+        "Moved to the root of the new space, with all pages under it. To undo, " +
+        "move it back with move_page_to_space, then move_page to its old parent.",
+      from: { spaceId: page.spaceId, parentPageId: page.parentPageId ?? null },
+      to: { spaceId, parentPageId: null },
+      backup: backupFile,
+    };
+  }
+
   async listSidebarPages(spaceId: string, pageId: string) {
     await this.ensureAuthenticated();
     const response = await this.client.post("/pages/sidebar-pages", {
@@ -1102,6 +1130,24 @@ server.registerTool(
     inputSchema: { pageId: z.string() },
   },
   async ({ pageId }) => jsonContent(await docmostClient.restorePage(pageId)),
+);
+
+// Tool: move_page_to_space
+server.registerTool(
+  "move_page_to_space",
+  {
+    description:
+      "Move a page to another space. All pages under it move with it, and it " +
+      "lands at the root of the target space. Content is unchanged, and links " +
+      "and the page ID keep working. A backup is saved first, and the result " +
+      "gives the old space and parent so it can be moved back (move_page_to_space, " +
+      "then move_page). To copy instead, use duplicate_page with spaceId.",
+    inputSchema: {
+      pageId: z.string(),
+      spaceId: z.string().describe("Target space ID"),
+    },
+  },
+  async ({ pageId, spaceId }) => jsonContent(await docmostClient.movePageToSpace(pageId, spaceId)),
 );
 
 async function run() {
