@@ -2,8 +2,8 @@
 // the MCP tools. Creates only "MCPTEST ..." pages in the test space and
 // permanently deletes them (and any copies) at the end, also on interrupt.
 //
-// Not run here, because they need a second space: move_page_to_space and
-// duplicate_page with spaceId (offline tests only).
+// Cross-space checks (move_page_to_space, duplicate_page with spaceId) use
+// the space named "MCPTEST Sandbox" as the second space, and clean it up too.
 //
 // Usage: npm run test:acceptance2
 import { mkdtemp } from "fs/promises";
@@ -18,6 +18,9 @@ const tool = mcpServer({ DOCMOST_BACKUP_DIR: backupDir });
 const created = [];
 cleanupOnInterrupt(api, created);
 const checks = [];
+const SANDBOX_NAME = "MCPTEST Sandbox";
+const spaces = await api.post("/spaces", { limit: 100 });
+const sandboxId = (spaces.items || []).find((sp) => sp.name === SANDBOX_NAME)?.id ?? null;
 
 const check = (name, pass, detail = "") => {
   checks.push({ name, pass });
@@ -162,6 +165,11 @@ try {
   check("get_comments returns the comment with author and text", comments.ok && byId[comment.id]?.text === "MCPTEST question" && !!byId[comment.id]?.author, comments.text.slice(0, 160));
   check("reply_to_comment posts in the thread", reply.ok && byId[reply.json.commentId]?.parentCommentId === comment.id && /MCPTEST answer/.test(byId[reply.json.commentId]?.text));
   check("a reply to a reply goes to the thread root", reply2.ok && byId[reply2.json.commentId]?.parentCommentId === comment.id && /posted to its thread/.test(reply2.json.message));
+  const pc = await tool.call("add_page_comment", { pageId: R.id, text: "MCPTEST page comment" });
+  const after2 = await tool.call("get_comments", { pageId: R.id });
+  const pcRow = (after2.json?.comments || []).find((c) => c.id === pc.json?.commentId);
+  check("add_page_comment posts an unanchored page comment prefixed [Claude]",
+    pc.ok && pcRow?.text === "[Claude] MCPTEST page comment" && pcRow?.type === "page" && !pcRow?.parentCommentId && !pcRow?.selection, pc.text.slice(0, 120));
 
   // Labels.
   const add = await tool.call("add_page_labels", { pageId: R.id, names: ["mcptest"] });
@@ -181,17 +189,48 @@ try {
   const bl = await tool.call("get_backlinks", { pageId: P.id });
   check("get_backlinks answers", bl.ok && Array.isArray(bl.json.pages), bl.text.slice(0, 120));
   info(`get_backlinks incoming for the parent: ${bl.json?.pages?.map((p) => p.title).join(", ") || "none"}`);
+
+  // Cross-space, between the test space and the sandbox only.
+  check(`the "${SANDBOX_NAME}" space exists`, !!sandboxId);
+  if (sandboxId) {
+    const X = await apiPage("cross parent", para("cross"));
+    const X1 = await apiPage("cross child", para("child"), X.id);
+    const mv = await tool.call("move_page_to_space", { pageId: X.id, spaceId: sandboxId });
+    const xi = await api.post("/pages/info", { pageId: X.id });
+    const x1i = await api.post("/pages/info", { pageId: X1.id });
+    check("move_page_to_space moves the page to the sandbox root, with its child",
+      mv.ok && xi.spaceId === sandboxId && !xi.parentPageId && x1i.spaceId === sandboxId && x1i.parentPageId === X.id, mv.text.slice(0, 160));
+    check("move_page_to_space reports where the page came from", mv.json?.from?.spaceId === TEST_SPACE_ID && mv.json?.to?.spaceId === sandboxId);
+    const kids = await tool.call("list_child_pages", { pageId: X.id });
+    check("the moved page still has its child", kids.json?.length === 1 && kids.json[0].id === X1.id);
+    const back = await tool.call("move_page_to_space", { pageId: X.id, spaceId: TEST_SPACE_ID });
+    const xb = await api.post("/pages/info", { pageId: X.id });
+    const x1b = await api.post("/pages/info", { pageId: X1.id });
+    check("move_page_to_space moves it back, child included", back.ok && xb.spaceId === TEST_SPACE_ID && x1b.spaceId === TEST_SPACE_ID && x1b.parentPageId === X.id);
+    const cp = await tool.call("duplicate_page", { pageId: X.id, spaceId: sandboxId });
+    if (cp.json?.newPageId) created.push(cp.json.newPageId);
+    const cpKids = cp.json?.newPageId ? await tool.call("list_child_pages", { pageId: cp.json.newPageId }) : { json: [] };
+    for (const k of cpKids.json || []) created.push(k.id);
+    const cpi = cp.json?.newPageId ? await api.post("/pages/info", { pageId: cp.json.newPageId }) : {};
+    check("duplicate_page with spaceId copies page and child into the sandbox, same title",
+      cp.ok && cpi.spaceId === sandboxId && cpi.title === `${PREFIX} cross parent` && cp.json.copiedChildPages === 1 && cpKids.json?.length === 1, cp.text.slice(0, 160));
+    const orig = await api.post("/pages/info", { pageId: X.id });
+    check("the original stays in the test space", orig.spaceId === TEST_SPACE_ID && !orig.deletedAt);
+  }
 } finally {
   for (const id of created.filter(Boolean)) {
     await api.post("/pages/delete", { pageId: id, permanentlyDelete: true }).catch(() => {});
   }
   tool.close();
   check("stdout carries protocol only", tool.strayStdout.length === 0, tool.strayStdout[0] ?? "");
-  const trash = await api.post("/pages/trash", { spaceId: TEST_SPACE_ID, limit: 100 });
-  const left = (trash.items || []).filter((p) => /^(Copy of )?MCPTEST /.test(p.title || ""));
-  const live = await api.post("/pages/recent", { spaceId: TEST_SPACE_ID, limit: 100 });
-  const leftLive = (live.items || []).filter((p) => /^(Copy of )?MCPTEST /.test(p.title || ""));
-  check("no MCPTEST pages left in the test space or its trash", left.length === 0 && leftLive.length === 0, [...left, ...leftLive].map((p) => p.title).join(", "));
+  const leftovers = [];
+  for (const spaceId of [TEST_SPACE_ID, sandboxId].filter(Boolean)) {
+    for (const path of ["/pages/trash", "/pages/recent"]) {
+      const r = await api.post(path, { spaceId, limit: 100 });
+      leftovers.push(...(r.items || []).filter((p) => /^(Copy of )?MCPTEST /.test(p.title || "")));
+    }
+  }
+  check("no MCPTEST pages left in the test space, the sandbox, or their trash", leftovers.length === 0, leftovers.map((p) => p.title).join(", "));
   const failed = checks.filter((c) => !c.pass).length;
   console.log(`${checks.length - failed}/${checks.length} checks passed`);
   process.exitCode = failed ? 1 : 0;

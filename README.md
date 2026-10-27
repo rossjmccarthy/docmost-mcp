@@ -82,6 +82,7 @@ The design rule is that a missing feature is better than silent data loss.
 | `restore_page` | Restore a page (and what is under it) from the trash | Yes (backup; trash it again) |
 | `restore_page_backup` | Put a page's content and title back to one of its backups, exact JSON | Yes (takes a pre-restore backup) |
 | `reply_to_comment` | Plain-text reply in a comment thread | Delete it in Docmost |
+| `add_page_comment` | Plain-text comment on the page as a whole, prefixed `[Claude] ` | Delete it in Docmost |
 | `add_page_labels`, `remove_page_label` | Change a page's labels | Yes (the other one) |
 | `delete_page`, `delete_pages` | Move to the Docmost trash | Yes (backup; `restore_page`) |
 
@@ -92,7 +93,9 @@ permission management, new comments anchored to page text (they need the
 Yjs client this fork removed), resolving or deleting comments.
 
 When Docmost refuses a request, tools fail with the endpoint, the HTTP
-status and Docmost's own reason, never with credentials.
+status and Docmost's own reason, never with credentials. A 401 (expired
+session) makes the server log in again and retry that request once; a
+second 401 is reported.
 
 ## Configuration
 
@@ -157,12 +160,13 @@ commit the credentials.
 ```bash
 npm run test:roundtrip            # fidelity per node/mark/attribute; add fixture names to run a subset
 npm run test:acceptance           # behaviour checks (guard, backups, titles, ...)
-npm run test:acceptance2          # the Phase 2 tools (tree, trash, backups restore, HTML, comments, labels)
+npm run test:acceptance2          # the Phase 2 tools; cross-space checks use a space named "MCPTEST Sandbox"
 HARNESS_MODES='html>html' npm run test:roundtrip   # one mode only (fork>native, native>native, html>html)
 node tests/scan-impact.mjs        # read-only: how many existing pages the guard would block
 node tests/scan-anchors.mjs       # read-only: links that point at heading anchors
 node tests/probe-ids.mjs          # one test page: how Docmost treats ids on JSON and Markdown writes
-node tests/cleanup.mjs            # remove leftover MCPTEST pages
+node tests/cleanup.mjs            # remove leftover MCPTEST pages (test space and "MCPTEST Sandbox")
+node tests/measure-descriptions.mjs  # offline: size of the tool descriptions an agent reads
 ```
 
 Optional for acceptance: `MCPTEST_SEARCH_QUERY` with the title it must find

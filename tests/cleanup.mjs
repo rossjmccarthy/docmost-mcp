@@ -1,6 +1,7 @@
-// Permanently delete leftover harness pages: only pages in the test space
-// (and its trash) whose title starts with "MCPTEST " (or "Copy of MCPTEST ",
-// from duplicate_page). Nothing else is touched.
+// Permanently delete leftover harness pages: only pages in the test space or
+// the "MCPTEST Sandbox" space (and their trash) whose title starts with
+// "MCPTEST " (or "Copy of MCPTEST ", from duplicate_page). Nothing else is
+// touched.
 // Usage: node tests/cleanup.mjs
 import { TEST_SPACE_ID, PREFIX, apiClient } from "./lib.mjs";
 
@@ -18,15 +19,24 @@ async function all(path, body) {
   return items;
 }
 
+const sandboxId = (await all("/spaces", {})).find((s) => s.name === "MCPTEST Sandbox")?.id;
+const spaceIds = [TEST_SPACE_ID, sandboxId].filter(Boolean);
+
 // duplicate_page names a same-space copy "Copy of <title>".
 const isTestPage = (p) =>
-  p.spaceId === TEST_SPACE_ID && typeof p.title === "string" &&
+  spaceIds.includes(p.spaceId) && typeof p.title === "string" &&
   (p.title.startsWith(`${PREFIX} `) || p.title.startsWith(`Copy of ${PREFIX} `));
 
-const live = await all("/pages/recent", { spaceId: TEST_SPACE_ID });
-const trashed = await all("/pages/trash", { spaceId: TEST_SPACE_ID });
-const targets = [...live, ...trashed].filter(isTestPage);
-for (const p of targets) {
-  await api.post("/pages/delete", { pageId: p.id, permanentlyDelete: true });
+const targets = [];
+for (const spaceId of spaceIds) {
+  targets.push(...(await all("/pages/recent", { spaceId })), ...(await all("/pages/trash", { spaceId })));
 }
-console.log(`permanently deleted ${targets.length} leftover ${PREFIX} pages`);
+const seen = new Set();
+let deleted = 0;
+for (const p of targets.filter(isTestPage)) {
+  if (seen.has(p.id)) continue;
+  seen.add(p.id);
+  await api.post("/pages/delete", { pageId: p.id, permanentlyDelete: true }).catch(() => {});
+  deleted++;
+}
+console.log(`permanently deleted ${deleted} leftover ${PREFIX} pages (${spaceIds.length} space(s) checked)`);
