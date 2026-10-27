@@ -7,7 +7,7 @@ import { ROOT } from "./lib.mjs";
 const results = JSON.parse(readFileSync(join(ROOT, "tests/roundtrip-results.json"), "utf-8"));
 const args = process.argv.slice(2);
 const detail = args[0] === "--detail" ? args.slice(1) : null;
-const modes = ["fork>native", "native>native", "fork>yjs", "html>html"];
+const modes = ["fork>native", "native>native", "html>html"];
 
 const cell = (r) => {
   if (!r) return "-";

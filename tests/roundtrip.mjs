@@ -3,7 +3,6 @@
 // stored JSON and diff. Modes:
 //   fork>native  get_page (fork Markdown converter) -> update_page (native Markdown)
 //   native>native get_page (Docmost Markdown)       -> update_page (native Markdown)
-//   fork>yjs     fork Markdown -> the fork's old Yjs writer (for comparison)
 //   html>html    Docmost HTML read -> Docmost HTML write (for comparison)
 // Only test pages titled "MCPTEST ..." in the test space are touched, and all
 // are permanently deleted at the end.
@@ -17,9 +16,6 @@ import {
   normalize, diff, typesIn,
 } from "./lib.mjs";
 import { fixtures } from "./fixtures.mjs";
-
-const { updatePageContentRealtime } = await import(join(ROOT, "build/lib/collaboration.js"));
-const { getCollabToken } = await import(join(ROOT, "build/lib/auth-utils.js"));
 
 const only = process.argv.slice(2);
 const selected = only.length ? fixtures.filter(([n]) => only.includes(n)) : fixtures;
@@ -54,16 +50,6 @@ const modes = {
   "native>native": async (pageId) => {
     const md = await readMarkdown(nativeTool, pageId);
     return { md, write: () => writeMarkdownViaTool(pageId, md) };
-  },
-  "fork>yjs": async (pageId) => {
-    const md = await readMarkdown(forkTool, pageId);
-    return {
-      md,
-      write: async () => {
-        const collab = await getCollabToken(process.env.DOCMOST_API_URL, api.token);
-        await updatePageContentRealtime(pageId, md, collab, process.env.DOCMOST_API_URL);
-      },
-    };
   },
   "html>html": async (pageId) => {
     const html = (await api.post("/pages/info", { pageId, format: "html" })).content;

@@ -1,34 +1,5 @@
 import axios from "axios";
 
-export async function getCollabToken(
-  baseUrl: string,
-  apiToken: string,
-): Promise<string> {
-  try {
-    const response = await axios.post(
-      `${baseUrl}/auth/collab-token`,
-      {},
-      {
-        headers: {
-          Authorization: `Bearer ${apiToken}`,
-          "Content-Type": "application/json",
-        },
-      },
-    );
-
-    // console.error('Collab Token Response:', response.data);
-    // Response is wrapped in { data: { token: ... } }
-    return response.data.data?.token || response.data.token;
-  } catch (error) {
-    if (axios.isAxiosError(error)) {
-      throw new Error(
-        `Failed to get collab token: ${error.response?.status} ${error.response?.statusText} - ${JSON.stringify(error.response?.data)}`,
-      );
-    }
-    throw error;
-  }
-}
-
 export async function performLogin(
   baseUrl: string,
   email: string,
