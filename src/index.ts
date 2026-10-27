@@ -81,6 +81,21 @@ const nodeText = (node: any): string => {
   return text;
 };
 
+/**
+ * Never let Markdown silently drop content: a note naming what it cannot
+ * represent, to put in front of a Markdown rendering ("" when nothing is lost).
+ */
+function markdownNotice(json: any, exactVia: string): string {
+  if (!json) return "";
+  const findings = inspectContent(json);
+  if (!isLossy(findings)) return "";
+  return (
+    `> Note: this page contains content Markdown cannot represent exactly ` +
+    `(${describeFindings(findings)}). Use ${exactVia} for the exact content, ` +
+    `and do not overwrite this page with Markdown.\n\n`
+  );
+}
+
 class DocmostClient {
   // ... [Client Implementation stays exactly the same] ...
   private client: AxiosInstance;
@@ -244,6 +259,42 @@ class DocmostClient {
     };
   }
 
+  /** Docmost's saved versions of a page, newest first, one page of results. */
+  async getPageHistory(pageId: string, cursor?: string, limit?: number) {
+    const { items, nextCursor } = await this.listOnePage("/pages/history", { pageId }, cursor, limit);
+    return {
+      versions: items.map((h: any) => ({
+        historyId: h.id,
+        title: h.title,
+        createdAt: h.createdAt,
+        lastUpdatedBy: h.lastUpdatedBy?.name ?? null,
+        contributors: (h.contributors || []).map((c: any) => c.name),
+      })),
+      nextCursor,
+    };
+  }
+
+  /** One saved version, as Markdown (with the usual notice) or exact JSON. */
+  async getPageVersion(historyId: string, format: "markdown" | "json" = "markdown") {
+    await this.ensureAuthenticated();
+    const response = await this.client.post("/pages/history/info", { historyId });
+    const h = response.data?.data ?? {};
+    const json = h.content ?? null;
+    const content =
+      format === "json"
+        ? json
+        : markdownNotice(json, 'get_page_version with format "json"') +
+          (json ? convertProseMirrorToMarkdown(json).replace("{{SUBPAGES}}", "") : "");
+    return {
+      historyId: h.id,
+      pageId: h.pageId,
+      title: h.title,
+      createdAt: h.createdAt,
+      lastUpdatedBy: h.lastUpdatedBy?.name ?? null,
+      content,
+    };
+  }
+
   async listSidebarPages(spaceId: string, pageId: string) {
     await this.ensureAuthenticated();
     const response = await this.client.post("/pages/sidebar-pages", {
@@ -338,15 +389,7 @@ class DocmostClient {
       );
     }
 
-    // Never let Markdown silently drop content: say what it cannot represent.
-    const findings = json ? inspectContent(json) : null;
-    if (findings && isLossy(findings)) {
-      content =
-        `> Note: this page contains content Markdown cannot represent exactly ` +
-        `(${describeFindings(findings)}). Use get_page with format "json" for ` +
-        `the exact content, and do not overwrite this page with Markdown.\n\n` +
-        content;
-    }
+    content = markdownNotice(json, 'get_page with format "json"') + content;
 
     return {
       data: filterPage(resultData, content, subpages),
@@ -956,6 +999,43 @@ server.registerTool(
     inputSchema: { spaceId: z.string() },
   },
   async ({ spaceId }) => jsonContent(await docmostClient.getSpace(spaceId)),
+);
+
+// Pagination arguments shared by tools that return one page of a long list.
+const pagingSchema = {
+  cursor: z.string().optional().describe("nextCursor from the previous call, for the next page"),
+  limit: z.number().int().min(1).max(100).optional().describe("Items per page (default 50)"),
+};
+
+// Tool: get_page_history
+server.registerTool(
+  "get_page_history",
+  {
+    description:
+      "List the versions Docmost saved for a page, newest first (historyId, " +
+      "title, time, who edited). Read-only. Docmost does not save a version for " +
+      "every change, so this is not a reliable undo for MCP edits; use " +
+      "list_page_backups for that. Returns nextCursor when there are more.",
+    inputSchema: { pageId: z.string(), ...pagingSchema },
+  },
+  async ({ pageId, cursor, limit }) =>
+    jsonContent(await docmostClient.getPageHistory(pageId, cursor, limit)),
+);
+
+// Tool: get_page_version
+server.registerTool(
+  "get_page_version",
+  {
+    description:
+      "Get the content of one saved version from get_page_history. Read-only. " +
+      'Markdown by default (with a note if it cannot represent everything), or format "json" for the exact content.',
+    inputSchema: {
+      historyId: z.string(),
+      format: z.enum(["markdown", "json"]).optional().describe('"markdown" (default) or "json"'),
+    },
+  },
+  async ({ historyId, format }) =>
+    jsonContent(await docmostClient.getPageVersion(historyId, format ?? "markdown")),
 );
 
 async function run() {

@@ -331,6 +331,36 @@ const toolServer = async (fake, extraEnv = {}) =>
   });
 }
 
+// get_page_history returns one page plus nextCursor; get_page_version
+// renders Markdown with the lossy notice, or exact JSON.
+{
+  const statusDoc = { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Hi " }, { type: "status", attrs: { text: "Done", color: "green" } }] }] };
+  const fake = await fakeApi({
+    "/pages/history": (b) => ({
+      items: [{ id: "h2", title: "T", createdAt: "2026-10-27T10:00:00Z", lastUpdatedBy: { id: "u", name: "Ross", avatarUrl: null }, contributors: [{ id: "u", name: "Ross" }], content: "x" }],
+      meta: b.cursor ? { hasNextPage: false } : { hasNextPage: true, nextCursor: "c2" },
+    }),
+    "/pages/history/info": () => ({ id: "h2", pageId, title: "T", createdAt: "2026-10-27T10:00:00Z", lastUpdatedBy: { name: "Ross" }, content: statusDoc }),
+  });
+  const srv = await toolServer(fake);
+  const hist = await srv.call("get_page_history", { pageId, limit: 1 });
+  const md = await srv.call("get_page_version", { historyId: "h2" });
+  const js = await srv.call("get_page_version", { historyId: "h2", format: "json" });
+  srv.close();
+  fake.close();
+  await check("get_page_history returns versions and nextCursor, without content", () => {
+    assert.deepEqual(hist.json, {
+      versions: [{ historyId: "h2", title: "T", createdAt: "2026-10-27T10:00:00Z", lastUpdatedBy: "Ross", contributors: ["Ross"] }],
+      nextCursor: "c2",
+    });
+    assert.equal(fake.requests[0].body.limit, 1);
+  });
+  await check("get_page_version markdown flags what it cannot show", () =>
+    assert.match(md.json.content, /^> Note: .*status .*get_page_version with format "json"/));
+  await check("get_page_version json returns the exact content", () =>
+    assert.deepEqual(js.json.content, statusDoc));
+}
+
 // Backup folders are owner-only, and the startup sweep expires old backups
 // across all pages, including a page's newest once it is past the limit.
 {
