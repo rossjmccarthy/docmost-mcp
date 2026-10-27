@@ -226,6 +226,24 @@ class DocmostClient {
     return pages.map((p: any) => ({ id: p.id, title: p.title, hasChildren: !!p.hasChildren }));
   }
 
+  /** The page's ancestors from the space root down, ending with the page. */
+  async getBreadcrumbs(pageId: string) {
+    await this.ensureAuthenticated();
+    const response = await this.client.post("/pages/breadcrumbs", { pageId });
+    const crumbs: any[] = response.data?.data ?? [];
+    return crumbs.map((p) => ({ id: p.id, title: p.title, spaceId: p.spaceId }));
+  }
+
+  async getSpace(spaceId: string) {
+    await this.ensureAuthenticated();
+    const response = await this.client.post("/spaces/info", { spaceId });
+    const space = response.data?.data ?? {};
+    return {
+      ...filterSpace(space),
+      ...(typeof space.memberCount === "number" ? { memberCount: space.memberCount } : {}),
+    };
+  }
+
   async listSidebarPages(spaceId: string, pageId: string) {
     await this.ensureAuthenticated();
     const response = await this.client.post("/pages/sidebar-pages", {
@@ -914,6 +932,30 @@ server.registerTool(
     },
   },
   async ({ pageId, spaceId }) => jsonContent(await docmostClient.listChildPages({ pageId, spaceId })),
+);
+
+// Tool: get_breadcrumbs
+server.registerTool(
+  "get_breadcrumbs",
+  {
+    description:
+      "Get a page's location: its ancestors from the space root down, ending " +
+      "with the page itself. Read-only.",
+    inputSchema: { pageId: z.string() },
+  },
+  async ({ pageId }) => jsonContent(await docmostClient.getBreadcrumbs(pageId)),
+);
+
+// Tool: get_space
+server.registerTool(
+  "get_space",
+  {
+    description:
+      "Get one space's details (name, slug, description, visibility, member " +
+      "count). Read-only; does not list or change members.",
+    inputSchema: { spaceId: z.string() },
+  },
+  async ({ spaceId }) => jsonContent(await docmostClient.getSpace(spaceId)),
 );
 
 async function run() {

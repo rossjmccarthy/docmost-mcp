@@ -305,6 +305,32 @@ const toolServer = async (fake, extraEnv = {}) =>
   });
 }
 
+// get_breadcrumbs and get_space trim Docmost's responses.
+{
+  const fake = await fakeApi({
+    "/pages/breadcrumbs": () => [
+      { id: "root", title: "Root", spaceId: "s", slugId: "x", position: "a0", hasChildren: true },
+      { id: pageId, title: "Leaf", spaceId: "s", slugId: "y", hasChildren: false },
+    ],
+    "/spaces/info": () => ({ id: "s", name: "Inbox", slug: "inbox", visibility: "private", memberCount: 2, membership: { role: "admin" }, settings: {} }),
+  });
+  const srv = await toolServer(fake);
+  const crumbs = await srv.call("get_breadcrumbs", { pageId });
+  const space = await srv.call("get_space", { spaceId: "s" });
+  srv.close();
+  fake.close();
+  await check("get_breadcrumbs returns root-to-page ids and titles only", () =>
+    assert.deepEqual(crumbs.json, [
+      { id: "root", title: "Root", spaceId: "s" },
+      { id: pageId, title: "Leaf", spaceId: "s" },
+    ]));
+  await check("get_space returns space fields and member count, not membership", () => {
+    assert.equal(space.json.name, "Inbox");
+    assert.equal(space.json.memberCount, 2);
+    assert.equal(space.json.membership, undefined);
+  });
+}
+
 // Backup folders are owner-only, and the startup sweep expires old backups
 // across all pages, including a page's newest once it is past the limit.
 {
