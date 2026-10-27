@@ -32,8 +32,11 @@ The design rule is that a missing feature is better than silent data loss.
   links), highlight and text colour. Non-default alignment, indent, table
   column widths, cell colours, open details blocks and marks combined with
   inline code also block, because Docmost's Markdown import cannot carry
-  them. A Markdown rewrite always regenerates heading and paragraph ids, so
-  links to a specific heading on a rewritten page break.
+  them. Docmost gives every heading and paragraph a new id on a Markdown
+  write; after a replace the server puts back the previous id of each
+  heading whose text is unchanged (with one extra write that changes only
+  ids), so links to those headings keep working. The result's `headingIds`
+  says how many were kept. Paragraph ids are not kept.
 - **append and prepend are always safe.** They add new blocks without
   touching existing ones, so they skip the guard (and still back up).
 - **Honest reads.** `get_page` returns Markdown by default, and starts the
@@ -117,6 +120,8 @@ commit the credentials.
 npm run test:roundtrip            # fidelity per node/mark/attribute; add fixture names to run a subset
 npm run test:acceptance           # behaviour checks (guard, backups, titles, ...)
 node tests/scan-impact.mjs        # read-only: how many existing pages the guard would block
+node tests/scan-anchors.mjs       # read-only: links that point at heading anchors
+node tests/probe-ids.mjs          # one test page: how Docmost treats ids on JSON and Markdown writes
 node tests/cleanup.mjs            # remove leftover MCPTEST pages
 ```
 

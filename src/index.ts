@@ -60,6 +60,23 @@ const MARKDOWN_READER =
 
 type ContentOperation = "replace" | "append" | "prepend";
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Visit every node of a ProseMirror document, depth first, in order. */
+function walkNodes(node: any, visit: (n: any) => unknown) {
+  if (!node || typeof node !== "object") return;
+  visit(node);
+  if (Array.isArray(node.content)) node.content.forEach((c: any) => walkNodes(c, visit));
+}
+
+const nodeText = (node: any): string => {
+  let text = "";
+  walkNodes(node, (n) => {
+    if (typeof n.text === "string") text += n.text;
+  });
+  return text;
+};
+
 class DocmostClient {
   // ... [Client Implementation stays exactly the same] ...
   private client: AxiosInstance;
@@ -400,6 +417,13 @@ class DocmostClient {
     }
     await this.client.post("/pages/update", body);
 
+    // A Markdown replace gives every heading a new id, which breaks links to
+    // its anchor. Put back the old id wherever the heading text is unchanged.
+    const headingIds =
+      content !== undefined && operation === "replace"
+        ? await this.restoreHeadingIds(pageId, page.content)
+        : undefined;
+
     return {
       success: true,
       pageId,
@@ -408,8 +432,77 @@ class DocmostClient {
         content === undefined
           ? "Page title updated."
           : `Page content ${operation === "replace" ? "replaced" : operation + "ed"}.`,
+      ...(headingIds ? { headingIds } : {}),
       backup: backupFile,
     };
+  }
+
+  /** Read stored content until it differs from `before` and is stable. */
+  async waitForStoredChange(pageId: string, before: string, timeoutMs = 15000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const first = JSON.stringify((await this.getPageRaw(pageId))?.content ?? null);
+      if (first !== before) {
+        await sleep(500);
+        const second = (await this.getPageRaw(pageId))?.content ?? null;
+        if (JSON.stringify(second) === first) return second;
+      } else {
+        await sleep(300);
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * After a Markdown replace, give each heading whose text is unchanged its
+   * previous id again (repeated texts pair up in order), with one JSON write
+   * that changes nothing but ids. Never throws: the replace itself has
+   * already succeeded, so problems are reported in the result.
+   */
+  async restoreHeadingIds(pageId: string, before: any) {
+    const oldIds = new Map<string, string[]>();
+    let withIds = 0;
+    walkNodes(before, (n) => {
+      if (n.type === "heading" && typeof n.attrs?.id === "string" && n.attrs.id) {
+        const text = nodeText(n);
+        oldIds.set(text, [...(oldIds.get(text) || []), n.attrs.id]);
+        withIds++;
+      }
+    });
+    if (!withIds) return undefined;
+
+    try {
+      const after = await this.waitForStoredChange(pageId, JSON.stringify(before));
+      if (!after || after.type !== "doc") {
+        return { kept: 0, of: withIds, note: "The new content did not appear in time, so heading ids were not restored." };
+      }
+      // Docmost does not de-duplicate ids, so never reuse one already present.
+      const present = new Set<string>();
+      walkNodes(after, (n) => typeof n.attrs?.id === "string" && present.add(n.attrs.id));
+      const patched = structuredClone(after);
+      let kept = 0;
+      walkNodes(patched, (n) => {
+        if (n.type !== "heading") return;
+        const queue = oldIds.get(nodeText(n));
+        const id = queue?.shift();
+        if (!id) return;
+        if (n.attrs?.id === id) { kept++; return; }
+        if (present.has(id)) return;
+        n.attrs = { ...n.attrs, id };
+        present.add(id);
+        kept++;
+      });
+      if (JSON.stringify(patched) !== JSON.stringify(after)) {
+        await this.client.post("/pages/update", { pageId, content: patched, format: "json", operation: "replace" });
+      }
+      return {
+        kept,
+        of: withIds,
+        ...(kept < withIds ? { note: `${withIds - kept} heading(s) changed text or were removed, so their anchors changed.` } : {}),
+      };
+    } catch (err: any) {
+      return { kept: 0, of: withIds, note: `Heading ids were not restored: ${err.message}` };
+    }
   }
 
   async search(

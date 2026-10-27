@@ -133,6 +133,18 @@ try {
   await settle(ap.id, afterPrepend);
   check("forced replace succeeds and took a backup", fr.ok && (await backupsFor(ap.id)).length === 3, fr.ok ? "" : fr.text);
 
+  // A Markdown replace keeps the ids (anchors) of headings whose text did not
+  // change; the tool waits for its own id-restoring write before returning.
+  const hd = (id, text) => ({ type: "heading", attrs: { id, level: 2 }, content: [{ type: "text", text }] });
+  const hp = await apiPage("heading ids", { type: "doc", content: [hd("mcptestkeep1", "Alpha"), hd("mcptestgone1", "Beta"), hd("mcptestkeep2", "Gamma")] });
+  const hr = await tool.call("update_page", { pageId: hp.id, content: "## Alpha\n\nnew text\n\n## Beta renamed\n\n## Gamma", operation: "replace" });
+  await sleep(1500);
+  const hAfter = (await api.post("/pages/info", { pageId: hp.id })).content;
+  const hIds = (hAfter?.content || []).filter((n) => n.type === "heading").map((n) => n.attrs?.id);
+  check("replace keeps ids of headings with unchanged text",
+    hr.ok && hr.json?.headingIds?.kept === 2 && hIds[0] === "mcptestkeep1" && hIds[1] !== "mcptestgone1" && hIds[2] === "mcptestkeep2",
+    `${JSON.stringify(hr.json?.headingIds)} ids ${hIds.join(",")}`);
+
   // F4: get_page is honest.
   const gp = await apiPage("get-page", fixture("status"));
   const md = await tool.call("get_page", { pageId: gp.id });

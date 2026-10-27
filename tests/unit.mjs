@@ -144,6 +144,64 @@ for (const [label, content] of [
   });
 }
 
+// After a Markdown replace, headings whose text is unchanged get their old
+// ids back (repeated texts pair up in order) in one JSON write. Docmost
+// stores the Markdown write a little later, as the real one does.
+async function statefulDocmost(initial, converted) {
+  let content = initial;
+  const writes = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/api/auth/login") {
+        res.setHeader("set-cookie", "authToken=t; Path=/");
+        return res.end("{}");
+      }
+      if (req.url === "/api/pages/info") {
+        return res.end(JSON.stringify({ success: true, data: { id: pageId, spaceId: "s", title: "t", content } }));
+      }
+      const b = JSON.parse(body || "{}");
+      writes.push({ url: req.url, format: b.format, content: b.content });
+      if (req.url === "/api/pages/update" && b.format === "markdown") setTimeout(() => (content = converted), 400);
+      if (req.url === "/api/pages/update" && b.format === "json") content = b.content;
+      res.end(JSON.stringify({ success: true, data: {} }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${server.address().port}/api`, writes, current: () => content, close: () => server.close() };
+}
+
+{
+  const h = (id, text) => ({ type: "heading", attrs: { id, level: 2 }, content: [{ type: "text", text }] });
+  const p = (id, text) => ({ type: "paragraph", attrs: { id }, content: [{ type: "text", text }] });
+  const before = { type: "doc", content: [h("oldalpha", "Alpha"), p("oldpara", "x"), h("oldbeta", "Beta"), h("oldalpha2", "Alpha"), h(null, "Gamma")] };
+  const converted = { type: "doc", content: [h("new1", "Alpha"), h("new2", "Beta changed"), h("new3", "Alpha"), h("new4", "Alpha"), h("new5", "Gamma"), p("new6", "y")] };
+  const fake = await statefulDocmost(before, converted);
+  const backupDir = await mkdtemp(join(tmpdir(), "mcp-unit-"));
+  const srv = mcpServer({ DOCMOST_API_URL: fake.url, DOCMOST_EMAIL: "x", DOCMOST_PASSWORD: "x", DOCMOST_BACKUP_DIR: backupDir });
+  const r = await srv.call("update_page", { pageId, content: "## Alpha\n\n## Beta changed\n\n## Alpha\n\n## Alpha\n\n## Gamma\n\ny", operation: "replace" });
+  const ids = fake.current().content.map((n) => n.attrs.id);
+  await check("replace restores ids of headings with unchanged text", () => {
+    assert.equal(r.ok, true, r.text);
+    assert.deepEqual(ids, ["oldalpha", "new2", "oldalpha2", "new4", "new5", "new6"]);
+    assert.deepEqual(r.json.headingIds, { kept: 2, of: 3, note: "1 heading(s) changed text or were removed, so their anchors changed." });
+  });
+  await check("id restore is one extra JSON write that changes only ids", () => {
+    assert.deepEqual(fake.writes.map((w) => w.format), ["markdown", "json"]);
+    const strip = (d) => JSON.stringify(d, (k, v) => (k === "id" ? undefined : v));
+    assert.equal(strip(fake.writes[1].content), strip(converted));
+  });
+  const append = await srv.call("update_page", { pageId, content: "more", operation: "append" });
+  await check("append does not touch heading ids", () => {
+    assert.equal(append.json.headingIds, undefined);
+    assert.equal(fake.writes.length, 3);
+  });
+  srv.close();
+  fake.close();
+}
+
 // Backup folders are owner-only, and the startup sweep expires old backups
 // across all pages, including a page's newest once it is past the limit.
 {
