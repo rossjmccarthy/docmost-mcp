@@ -363,6 +363,35 @@ class DocmostClient {
     };
   }
 
+  /**
+   * Copy a page and every page under it, in the same space ("Copy of ...",
+   * placed after the original) or into another space (same title, at its
+   * root). The original is not changed; it is backed up anyway, as before any
+   * write.
+   */
+  async duplicatePage(pageId: string, spaceId?: string) {
+    const { page, backupFile } = await this.snapshot(pageId, "duplicate");
+    const response = await this.client.post("/pages/duplicate", {
+      pageId,
+      ...(spaceId ? { spaceId } : {}),
+    });
+    const copy = response.data?.data ?? {};
+    const childPageIds: string[] = copy.childPageIds ?? [];
+    return {
+      success: true,
+      sourcePageId: pageId,
+      newPageId: copy.id,
+      title: copy.title,
+      spaceId: copy.spaceId ?? spaceId ?? page.spaceId,
+      parentPageId: copy.parentPageId ?? null,
+      copiedChildPages: childPageIds.length,
+      message:
+        `Copied the page${childPageIds.length ? ` and ${childPageIds.length} page(s) under it` : ""}. ` +
+        "To undo, delete_page the copy (newPageId).",
+      backup: backupFile,
+    };
+  }
+
   async listSidebarPages(spaceId: string, pageId: string) {
     await this.ensureAuthenticated();
     const response = await this.client.post("/pages/sidebar-pages", {
@@ -1148,6 +1177,23 @@ server.registerTool(
     },
   },
   async ({ pageId, spaceId }) => jsonContent(await docmostClient.movePageToSpace(pageId, spaceId)),
+);
+
+// Tool: duplicate_page
+server.registerTool(
+  "duplicate_page",
+  {
+    description:
+      "Copy a page and all pages under it. Without spaceId the copy is titled " +
+      '"Copy of ..." and placed right after the original; with spaceId it is ' +
+      "copied into that space at its root with the same title. The original is " +
+      "not changed. Returns newPageId. Reversible: delete_page the copy.",
+    inputSchema: {
+      pageId: z.string(),
+      spaceId: z.string().optional().describe("Copy into this space instead of the same one"),
+    },
+  },
+  async ({ pageId, spaceId }) => jsonContent(await docmostClient.duplicatePage(pageId, spaceId)),
 );
 
 async function run() {

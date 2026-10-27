@@ -417,6 +417,27 @@ const toolServer = async (fake, extraEnv = {}) =>
   });
 }
 
+// duplicate_page backs up the source and reports the copy.
+{
+  const fake = await fakeApi({
+    "/pages/info": () => ({ id: pageId, spaceId: "s1", title: "T", parentPageId: null, content: { type: "doc", content: [] } }),
+    "/pages/duplicate": (b) => ({ id: "copy", title: b.spaceId ? "T" : "Copy of T", spaceId: b.spaceId ?? "s1", parentPageId: null, childPageIds: ["k1", "k2"] }),
+  });
+  const srv = await toolServer(fake);
+  const same = await srv.call("duplicate_page", { pageId });
+  const other = await srv.call("duplicate_page", { pageId, spaceId: "s2" });
+  srv.close();
+  fake.close();
+  await check("duplicate_page returns the copy and how many child pages came with it", () => {
+    assert.equal(same.json.newPageId, "copy");
+    assert.equal(same.json.title, "Copy of T");
+    assert.equal(same.json.copiedChildPages, 2);
+    assert.match(same.json.backup, /_duplicate\.json$/);
+    assert.equal(other.json.spaceId, "s2");
+    assert.equal(fake.requests.find((q) => q.url === "/pages/duplicate").body.spaceId, undefined);
+  });
+}
+
 // Backup folders are owner-only, and the startup sweep expires old backups
 // across all pages, including a page's newest once it is past the limit.
 {
