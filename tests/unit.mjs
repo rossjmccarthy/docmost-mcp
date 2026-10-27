@@ -613,11 +613,16 @@ const toolServer = async (fake, extraEnv = {}) =>
   const fake = await fakeApi({
     "/pages/info": () => ({ id: pageId, spaceId: "s", title: "T", parentPageId: null, content: { type: "doc", content: [] } }),
     "/comments/create": (b) => ({ id: "c-new", ...b }),
+    "/comments": () => ({ items: [{ id: "c-new", pageId, type: "page", content: { type: "doc", content: [
+      { type: "paragraph", content: [{ type: "text", text: "[Claude] Looks *good* " }, { type: "mention", attrs: { label: "Ross" } }, { type: "hardBreak" }, { type: "text", text: "line two", marks: [{ type: "bold" }] }] },
+      { type: "paragraph", content: [{ type: "text", text: "second para" }] },
+    ] }, creator: { name: "Claude" }, createdAt: "t" }], meta: {} }),
   });
   const srv = await toolServer(fake);
   const one = await srv.call("add_page_comment", { pageId, text: "Looks good" });
   const two = await srv.call("add_page_comment", { pageId, text: "[Claude] already prefixed" });
   const empty = await srv.call("add_page_comment", { pageId, text: " " });
+  const readBack = await srv.call("get_comments", { pageId });
   srv.close();
   fake.close();
   const posts = fake.requests.filter((q) => q.url === "/comments/create").map((q) => q.body);
@@ -631,6 +636,8 @@ const toolServer = async (fake, extraEnv = {}) =>
     assert.equal(firstText(posts[1]), "[Claude] already prefixed");
     assert.match(one.json.backup, /_comment\.json$/);
   });
+  await check("get_comments reads comment text back as plain text, unescaped", () =>
+    assert.equal(readBack.json.comments[0].text, "[Claude] Looks *good* @Ross\nline two\n\nsecond para"));
   await check("add_page_comment refuses empty text without posting", () => {
     assert.equal(empty.ok, false);
     assert.equal(posts.length, 2);

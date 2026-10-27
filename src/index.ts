@@ -142,6 +142,29 @@ function plainTextDoc(text: string) {
   };
 }
 
+/**
+ * A comment body as plain text, the way the comment tools write it: blocks
+ * separated by blank lines, line breaks as newlines, mentions as @name.
+ * (Markdown would escape characters such as "[" in "[Claude] ".)
+ */
+function commentText(doc: any): string {
+  const blocks: string[] = [];
+  const inline = (n: any): string => {
+    if (!n || typeof n !== "object") return "";
+    if (n.type === "text") return n.text ?? "";
+    if (n.type === "hardBreak") return "\n";
+    if (n.type === "mention") return `@${n.attrs?.label ?? ""}`;
+    return (n.content || []).map(inline).join("");
+  };
+  const walk = (n: any) => {
+    if (!n || typeof n !== "object") return;
+    if (["paragraph", "heading", "codeBlock"].includes(n.type)) blocks.push(inline(n));
+    else (n.content || []).forEach(walk);
+  };
+  walk(doc);
+  return blocks.join("\n\n").trim();
+}
+
 class DocmostClient {
   // ... [Client Implementation stays exactly the same] ...
   private client: AxiosInstance;
@@ -550,7 +573,7 @@ class DocmostClient {
           type: c.type ?? null,
           // The text the comment is anchored to (inline comments only).
           selection: c.selection ?? null,
-          text: c.content ? convertProseMirrorToMarkdown(c.content).replace("{{SUBPAGES}}", "").trim() : "",
+          text: commentText(c.content),
           author: c.creator?.name ?? null,
           createdAt: c.createdAt,
           editedAt: c.editedAt ?? null,
