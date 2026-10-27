@@ -1,6 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import FormData from "form-data";
 import axios, { AxiosInstance } from "axios";
 import { z } from "zod";
 import {
@@ -14,8 +13,7 @@ import { convertProseMirrorToMarkdown } from "./lib/markdown-converter.js";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { updatePageContentRealtime } from "./lib/collaboration.js";
-import { getCollabToken, performLogin } from "./lib/auth-utils.js";
+import { performLogin } from "./lib/auth-utils.js";
 
 // Read version from package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -51,6 +49,8 @@ const UNREBUILDABLE_NODE_TYPES = new Set([
   "mathBlock",
   "subpages",
 ]);
+
+type ContentOperation = "replace" | "append" | "prepend";
 
 class DocmostClient {
   // ... [Client Implementation stays exactly the same] ...
@@ -165,7 +165,6 @@ class DocmostClient {
     const response = await this.client.post("/pages/sidebar-pages", {
       spaceId,
       pageId,
-      page: 1,
     });
     return response.data?.data?.items || [];
   }
@@ -207,13 +206,8 @@ class DocmostClient {
   }
 
   /**
-   * Create a new page with title and content.
-   *
-   * Note: As long as Docmost doesn't provide a /pages/create endpoint that allows
-   * setting content directly, we must use the /pages/import workaround to create
-   * pages with initial content. This method:
-   * 1. Creates the page via /pages/import (which supports content)
-   * 2. Moves it to the correct parent if specified
+   * Create a page from Markdown with Docmost's native create endpoint, which
+   * sets the title exactly and keeps a leading heading in the body.
    */
   async createPage(
     title: string,
@@ -223,46 +217,15 @@ class DocmostClient {
   ) {
     await this.ensureAuthenticated();
 
-    if (parentPageId) {
-      try {
-        await this.getPage(parentPageId);
-      } catch (e) {
-        throw new Error(`Parent page with ID ${parentPageId} not found.`);
-      }
+    const body: Record<string, unknown> = { spaceId, title };
+    if (parentPageId) body.parentPageId = parentPageId;
+    if (content.trim() !== "") {
+      body.content = content;
+      body.format = "markdown";
     }
 
-    // 1. Create content via Import (using multipart/form-data)
-    const form = new FormData();
-    form.append("spaceId", spaceId);
-
-    const fileContent = Buffer.from(content, "utf-8");
-    form.append("file", fileContent, {
-      filename: `${title || "import"}.md`,
-      contentType: "text/markdown",
-    });
-
-    const headers = {
-      ...form.getHeaders(),
-      Authorization: `Bearer ${this.token}`,
-    };
-
-    // Use raw axios call for FormData handling
-    const response = await axios.post(`${API_URL}/pages/import`, form, {
-      headers,
-    });
-    const newPageId = response.data.data.id;
-
-    // 2. Import derives the title from the filename (e.g. spaces become
-    // underscores), so set the exact requested title explicitly.
-    await this.client.post("/pages/update", { pageId: newPageId, title });
-
-    // 3. Move to parent if needed
-    if (parentPageId) {
-      await this.movePage(newPageId, parentPageId);
-    }
-
-    // Return the final page object
-    return this.getPage(newPageId);
+    const response = await this.client.post("/pages/create", body);
+    return this.getPage(response.data.data.id);
   }
 
   /**
@@ -282,16 +245,24 @@ class DocmostClient {
   }
 
   /**
-   * Update a page's content and/or its title.
-   * Leverages WebSocket collaboration to update content without changing Page ID.
+   * Update a page's title and/or content with Docmost's native update
+   * endpoint. replace rewrites the whole body and is guarded; append and
+   * prepend only add nodes.
    */
   async updatePage(
     pageId: string,
-    content?: string,
-    title?: string,
-    force: boolean = false,
+    options: {
+      content?: string;
+      title?: string;
+      operation?: ContentOperation;
+      force?: boolean;
+    },
   ) {
     await this.ensureAuthenticated();
+
+    let { content } = options;
+    const { title, force = false } = options;
+    const operation = options.operation ?? "replace";
 
     // Empty or whitespace-only content means "not supplied" (title-only
     // rename), never "blank the page".
@@ -303,8 +274,8 @@ class DocmostClient {
       throw new Error("Nothing to update: provide content and/or title.");
     }
 
-    // 1. Refuse to overwrite content the writer cannot rebuild (before any write)
-    if (content !== undefined && !force) {
+    // Refuse to replace content the writer cannot rebuild (before any write)
+    if (content !== undefined && operation === "replace" && !force) {
       const unsupported = await this.findUnrebuildableNodes(pageId);
       if (unsupported.length > 0) {
         throw new Error(
@@ -316,44 +287,23 @@ class DocmostClient {
       }
     }
 
-    // 2. Update Title via REST API if provided
-    if (title) {
-      await this.client.post("/pages/update", { pageId, title });
+    const body: Record<string, unknown> = { pageId };
+    if (title) body.title = title;
+    if (content !== undefined) {
+      body.content = content;
+      body.format = "markdown";
+      body.operation = operation;
     }
-
-    if (content === undefined) {
-      return {
-        success: true,
-        modified: true,
-        message: "Page title updated successfully.",
-        pageId: pageId,
-      };
-    }
-
-    // 3. Update Content via WebSocket
-    let collabToken = "";
-    try {
-      const baseURL = this.client.defaults.baseURL || "";
-      collabToken = await getCollabToken(baseURL, this.token!);
-      await updatePageContentRealtime(pageId, content, collabToken, baseURL);
-    } catch (error: any) {
-      console.error(
-        "Failed to update page content via realtime collaboration:",
-        error,
-      );
-      const tokenPreview = collabToken
-        ? collabToken.substring(0, 15) + "..."
-        : "null";
-      throw new Error(
-        `Failed to update page content: ${error.message} (Token: ${tokenPreview})`,
-      );
-    }
+    await this.client.post("/pages/update", body);
 
     return {
       success: true,
-      modified: true,
-      message: "Page updated successfully.",
-      pageId: pageId,
+      pageId,
+      operation: content === undefined ? "rename" : operation,
+      message:
+        content === undefined
+          ? "Page title updated."
+          : `Page content ${operation === "replace" ? "replaced" : operation + "ed"}.`,
     };
   }
 
@@ -497,12 +447,13 @@ server.registerTool(
   },
 );
 
-// Tool: create_page (Smart)
+// Tool: create_page
 server.registerTool(
   "create_page",
   {
     description:
-      "Create a new page with content (automatically moves it to the correct hierarchy).",
+      "Create a new page from Markdown, optionally under a parent page. The " +
+      "title is set exactly as given.",
     inputSchema: {
       title: z.string().describe("Title of the page"),
       content: z.string().describe("Markdown content"),
@@ -524,40 +475,46 @@ server.registerTool(
   },
 );
 
-// Tool: update_page (Safe)
+// Tool: update_page
 server.registerTool(
   "update_page",
   {
     description:
-      "Update a page's content and/or title via realtime collaboration (preserves Page ID and history). " +
-      "To rename only, pass title and omit content (empty content is treated as omitted). " +
-      "Content replaces the whole page; if the page contains blocks Markdown cannot rebuild " +
-      "(callout, details, mention, attachment, drawio, excalidraw, embed, video, youtube, " +
-      "mathInline, mathBlock, subpages) the update is refused unless force=true, which discards them.",
+      "Update a page's title and/or Markdown content. To rename only, pass " +
+      'title and omit content. operation "replace" (default) rewrites the whole ' +
+      "body and is refused if the page contains blocks Markdown cannot rebuild " +
+      "(the error names them) unless force=true, which discards them. " +
+      '"append" and "prepend" add content without touching existing blocks.',
     inputSchema: {
       pageId: z.string().describe("ID of the page to update"),
       content: z
         .string()
         .optional()
         .describe(
-          "New Markdown content (replaces the whole page). Omit to change only the title.",
+          "Markdown content. Omit (or leave empty) to change only the title.",
         ),
       title: z.string().optional().describe("Optional new title"),
+      operation: z
+        .enum(["replace", "append", "prepend"])
+        .optional()
+        .describe(
+          '"replace" (default) the whole body, or "append"/"prepend" the content',
+        ),
       force: z
         .boolean()
         .optional()
         .describe(
-          "Overwrite even if the page contains blocks Markdown cannot rebuild (callouts, embeds, attachments, etc.), which will be lost.",
+          "replace only: overwrite even though blocks Markdown cannot rebuild will be lost",
         ),
     },
   },
-  async ({ pageId, content, title, force }) => {
-    const result = await docmostClient.updatePage(
-      pageId,
+  async ({ pageId, content, title, operation, force }) => {
+    const result = await docmostClient.updatePage(pageId, {
       content,
       title,
+      operation,
       force,
-    );
+    });
     return jsonContent(result);
   },
 );
@@ -567,7 +524,7 @@ server.registerTool(
   "move_page",
   {
     description:
-      "Move a page to a new parent (nesting) or root. Essential for organizing pages created via 'import_page'.",
+      "Move a page to a new parent within its space, or to the space root.",
     inputSchema: {
       pageId: z.string(),
       parentPageId: z
