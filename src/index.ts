@@ -125,6 +125,23 @@ function withoutUnset(value: any, isDoc = true): any {
   return out;
 }
 
+/** Prefix on comments the agent starts, so people can tell who wrote them. */
+const COMMENT_PREFIX = "[Claude] ";
+
+/** Plain text as a comment body: blank lines separate paragraphs, newlines break. */
+function plainTextDoc(text: string) {
+  return {
+    type: "doc",
+    content: text.trim().split(/\n\s*\n/).map((para) => ({
+      type: "paragraph",
+      content: para.split("\n").flatMap((line, i) => [
+        ...(i ? [{ type: "hardBreak" }] : []),
+        ...(line ? [{ type: "text", text: line }] : []),
+      ]),
+    })),
+  };
+}
+
 class DocmostClient {
   // ... [Client Implementation stays exactly the same] ...
   private client: AxiosInstance;
@@ -549,21 +566,9 @@ class DocmostClient {
       root = (await this.client.post("/comments/info", { commentId: target.parentCommentId })).data?.data;
     }
     const { backupFile } = await this.snapshot(target.pageId, "comment-reply");
-
-    // Plain text: blank lines separate paragraphs, single newlines are breaks.
-    const doc = {
-      type: "doc",
-      content: text.trim().split(/\n\s*\n/).map((para) => ({
-        type: "paragraph",
-        content: para.split("\n").flatMap((line, i) => [
-          ...(i ? [{ type: "hardBreak" }] : []),
-          ...(line ? [{ type: "text", text: line }] : []),
-        ]),
-      })),
-    };
     const response = await this.client.post("/comments/create", {
       pageId: target.pageId,
-      content: JSON.stringify(doc),
+      content: JSON.stringify(plainTextDoc(text)),
       parentCommentId: root.id,
       ...(root.type ? { type: root.type } : {}),
     });
@@ -576,6 +581,28 @@ class DocmostClient {
       message:
         (root.id !== commentId ? "That comment is a reply, so this was posted to its thread. " : "") +
         "Posted as plain text. To remove it, delete it in Docmost.",
+      backup: backupFile,
+    };
+  }
+
+  /**
+   * Add a page-level comment (not anchored to any text). The text is
+   * prefixed "[Claude] " so people can tell it was written by the agent.
+   */
+  async addPageComment(pageId: string, text: string) {
+    if (!text.trim()) throw new Error("Nothing to post: the comment text is empty.");
+    const body = text.trim().startsWith(COMMENT_PREFIX) ? text.trim() : COMMENT_PREFIX + text.trim();
+    const { backupFile } = await this.snapshot(pageId, "comment");
+    const response = await this.client.post("/comments/create", {
+      pageId,
+      content: JSON.stringify(plainTextDoc(body)),
+      type: "page",
+    });
+    return {
+      success: true,
+      commentId: response.data?.data?.id,
+      pageId,
+      message: "Posted as a page comment, plain text. To remove it, delete it in Docmost.",
       backup: backupFile,
     };
   }
@@ -1577,6 +1604,21 @@ server.registerTool(
   },
   async ({ pageId, direction, cursor, limit }) =>
     jsonContent(await docmostClient.getBacklinks(pageId, direction ?? "incoming", cursor, limit)),
+);
+
+// Tool: add_page_comment
+server.registerTool(
+  "add_page_comment",
+  {
+    description:
+      'Add a plain-text comment to a page as a whole, prefixed "[Claude] ". Does ' +
+      "not change the page. Cannot anchor to page text. Undo: delete it in Docmost.",
+    inputSchema: {
+      pageId: z.string(),
+      text: z.string().describe("Comment text; blank lines separate paragraphs"),
+    },
+  },
+  async ({ pageId, text }) => jsonContent(await docmostClient.addPageComment(pageId, text)),
 );
 
 async function run() {

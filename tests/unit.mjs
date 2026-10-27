@@ -607,6 +607,36 @@ const toolServer = async (fake, extraEnv = {}) =>
   });
 }
 
+// add_page_comment posts an unanchored page comment prefixed "[Claude] ",
+// never twice, and refuses empty text.
+{
+  const fake = await fakeApi({
+    "/pages/info": () => ({ id: pageId, spaceId: "s", title: "T", parentPageId: null, content: { type: "doc", content: [] } }),
+    "/comments/create": (b) => ({ id: "c-new", ...b }),
+  });
+  const srv = await toolServer(fake);
+  const one = await srv.call("add_page_comment", { pageId, text: "Looks good" });
+  const two = await srv.call("add_page_comment", { pageId, text: "[Claude] already prefixed" });
+  const empty = await srv.call("add_page_comment", { pageId, text: " " });
+  srv.close();
+  fake.close();
+  const posts = fake.requests.filter((q) => q.url === "/comments/create").map((q) => q.body);
+  const firstText = (b) => JSON.parse(b.content).content[0].content[0].text;
+  await check("add_page_comment posts a page comment prefixed [Claude] once", () => {
+    assert.equal(one.ok, true, one.text);
+    assert.equal(one.json.commentId, "c-new");
+    assert.equal(posts[0].type, "page");
+    assert.equal(posts[0].parentCommentId, undefined);
+    assert.equal(firstText(posts[0]), "[Claude] Looks good");
+    assert.equal(firstText(posts[1]), "[Claude] already prefixed");
+    assert.match(one.json.backup, /_comment\.json$/);
+  });
+  await check("add_page_comment refuses empty text without posting", () => {
+    assert.equal(empty.ok, false);
+    assert.equal(posts.length, 2);
+  });
+}
+
 // Labels and backlinks; and a Docmost refusal comes back with Docmost's
 // reason, never the token.
 {
