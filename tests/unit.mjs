@@ -53,6 +53,17 @@ await check("guard allows doc.dir=auto from a Markdown create", () =>
 await check("guard still blocks a non-default doc.dir", () =>
   assert.equal(isLossy(inspectContent({ type: "doc", attrs: { dir: "rtl" }, content: [] })), true));
 
+// The HTML guard against tests/roundtrip.mjs in html>html mode (Docmost
+// 0.97.0, 2026-10-27): every fixture round-tripped exactly except these.
+const HTML_LOSSY = new Set(["details-open", "mixed-marks", "footnotes", "audio", "pdf", "attachment", "embed"]);
+for (const [name, doc] of fixtures) {
+  await check(`html guard: ${name}`, () =>
+    assert.equal(isLossy(inspectContent(doc, "html")), HTML_LOSSY.has(name),
+      HTML_LOSSY.has(name) ? "lossy under HTML but allowed" : "proven exact under HTML but blocked"));
+}
+await check("html guard blocks unknown node types", () =>
+  assert.ok(isLossy(inspectContent({ type: "doc", content: [{ type: "futureBlock" }] }, "html"))));
+
 // The guard fails closed on anything that is not a ProseMirror document,
 // and on type names that exist on Object.prototype.
 for (const [label, doc] of [
@@ -499,6 +510,57 @@ const toolServer = async (fake, extraEnv = {}) =>
   });
   await check("restore wrote exactly one JSON replace", () =>
     assert.equal(fake.requests.filter((q) => q.url === "/pages/update" && q.body.format === "json").length, 1));
+}
+
+// format "html": a page with tabs refuses a Markdown replace but allows an
+// HTML one (sent as format html); footnotes block even HTML; get_page html
+// puts the note in an HTML comment and turns an export failure into advice.
+{
+  const tabs = fixtures.find(([n]) => n === "tabs")[1];
+  const footnotes = fixtures.find(([n]) => n === "footnotes")[1];
+  let content = tabs;
+  const fake = await fakeApi({
+    "/pages/info": (b) => {
+      if (b.format === "html") {
+        if (content === footnotes) throw new Error("Internal server error");
+        return { id: pageId, content: "<p>html</p>" };
+      }
+      return { id: pageId, spaceId: "s", title: "T", parentPageId: null, content };
+    },
+    "/pages/sidebar-pages": () => ({ items: [], meta: {} }),
+    "/pages/update": () => ({}),
+    "/pages/create": () => ({ id: pageId }),
+  });
+  const srv = await toolServer(fake, { DOCMOST_HEADING_ID_TIMEOUT_MS: "300" });
+  const md = await srv.call("update_page", { pageId, content: "x", operation: "replace" });
+  const html = await srv.call("update_page", { pageId, content: "<p>x</p>", operation: "replace", format: "html" });
+  const okHtml = await srv.call("get_page", { pageId, format: "html" });
+  const created = await srv.call("create_page", { title: "T", content: "<p>x</p>", spaceId: "s", format: "html" });
+  content = footnotes;
+  const blocked = await srv.call("update_page", { pageId, content: "<p>x</p>", operation: "replace", format: "html" });
+  const failed = await srv.call("get_page", { pageId, format: "html" });
+  srv.close();
+  fake.close();
+  const updates = fake.requests.filter((q) => q.url === "/pages/update");
+  await check("tabs: Markdown replace refused, HTML replace allowed and sent as html", () => {
+    assert.equal(md.ok, false);
+    assert.match(md.text, /Markdown rewrite would lose/);
+    assert.equal(html.ok, true, html.text);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].body.format, "html");
+  });
+  await check("footnotes: HTML replace refused, naming them", () => {
+    assert.equal(blocked.ok, false);
+    assert.match(blocked.text, /HTML rewrite would lose or change: blocks: .*footnote/);
+  });
+  await check("get_page html returns Docmost's HTML with no note when nothing is lost", () =>
+    assert.equal(okHtml.json.data.content, "<p>html</p>"));
+  await check("get_page html export failure says to use json", () => {
+    assert.equal(failed.ok, false);
+    assert.match(failed.text, /could not render .* as HTML .* format "json"/);
+  });
+  await check("create_page sends format html when asked", () =>
+    assert.equal(fake.requests.find((q) => q.url === "/pages/create").body.format, "html"));
 }
 
 // Backup folders are owner-only, and the startup sweep expires old backups

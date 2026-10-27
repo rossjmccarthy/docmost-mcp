@@ -19,6 +19,7 @@ import {
   describeFindings,
   inspectContent,
   isLossy,
+  type ContentFormat,
 } from "./lib/content-guard.js";
 
 // Read version from package.json
@@ -553,7 +554,7 @@ class DocmostClient {
     return page;
   }
 
-  async getPage(pageId: string, format: "markdown" | "json" = "markdown") {
+  async getPage(pageId: string, format: "markdown" | "json" | "html" = "markdown") {
     const resultData = await this.getPageRaw(pageId);
     const json = resultData.content ?? null;
 
@@ -568,6 +569,34 @@ class DocmostClient {
     if (format === "json") {
       return {
         data: filterPage(resultData, json, subpages),
+        success: true,
+      };
+    }
+
+    if (format === "html") {
+      let html = "";
+      if (json) {
+        try {
+          const response = await this.client.post("/pages/info", { pageId, format: "html" });
+          const c = response.data?.data?.content;
+          html = typeof c === "string" ? c : "";
+        } catch (err: any) {
+          throw new Error(
+            `Docmost could not render page ${pageId} as HTML (${err.message}); it fails on ` +
+              `some blocks, such as footnotes. Use get_page with format "json" instead.`,
+          );
+        }
+      }
+      // A comment, not content: writing this HTML back must not add the note.
+      const findings = json ? inspectContent(json, "html") : null;
+      if (findings && isLossy(findings)) {
+        html =
+          `<!-- Note: this page contains content HTML cannot represent exactly ` +
+          `(${describeFindings(findings).replace(/--/g, "- -")}). Use get_page with format "json" ` +
+          `for the exact content, and do not overwrite this page with HTML. -->\n` + html;
+      }
+      return {
+        data: filterPage(resultData, html, subpages),
         success: true,
       };
     }
@@ -649,6 +678,7 @@ class DocmostClient {
     content: string,
     spaceId: string,
     parentPageId?: string,
+    format: ContentFormat = "markdown",
   ) {
     await this.ensureAuthenticated();
 
@@ -656,7 +686,7 @@ class DocmostClient {
     if (parentPageId) body.parentPageId = parentPageId;
     if (content.trim() !== "") {
       body.content = content;
-      body.format = "markdown";
+      body.format = format;
     }
 
     const response = await this.client.post("/pages/create", body);
@@ -675,11 +705,14 @@ class DocmostClient {
       title?: string;
       operation?: ContentOperation;
       force?: boolean;
+      format?: ContentFormat;
     },
   ) {
     let { content } = options;
     const { title, force = false } = options;
     const operation = options.operation ?? "replace";
+    const format = options.format ?? "markdown";
+    const formatName = format === "html" ? "HTML" : "Markdown";
 
     // Empty or whitespace-only content means "not supplied" (title-only
     // rename), never "blank the page".
@@ -693,13 +726,13 @@ class DocmostClient {
 
     const page = await this.getPageForWrite(pageId);
 
-    // Refuse to replace content that Markdown cannot rebuild exactly.
+    // Refuse to replace content that this format cannot rebuild exactly.
     if (content !== undefined && operation === "replace" && !force) {
-      const findings = inspectContent(page.content);
+      const findings = inspectContent(page.content, format);
       if (isLossy(findings)) {
         throw new Error(
           `Refusing to replace page ${pageId}: it contains content that a ` +
-            `Markdown rewrite would lose or change: ${describeFindings(findings)}. ` +
+            `${formatName} rewrite would lose or change: ${describeFindings(findings)}. ` +
             `Use operation "append" or "prepend" to add content without touching ` +
             `what is there, edit the page in Docmost, or pass force=true to ` +
             `overwrite anyway (a backup is taken first).`,
@@ -716,12 +749,12 @@ class DocmostClient {
     if (title) body.title = title;
     if (content !== undefined) {
       body.content = content;
-      body.format = "markdown";
+      body.format = format;
       body.operation = operation;
     }
     await this.client.post("/pages/update", body);
 
-    // A Markdown replace gives every heading a new id, which breaks links to
+    // A Markdown or HTML replace gives every heading a new id, which breaks links to
     // its anchor. Put back the old id wherever the heading text is unchanged.
     const headingIds =
       content !== undefined && operation === "replace"
@@ -949,13 +982,16 @@ server.registerTool(
       "Get a page's details and content. Read-only. Markdown (the default) is " +
       "convenient but cannot represent every Docmost block; when it cannot, the " +
       "content starts with a note naming what is missing. Use format \"json\" for " +
-      "the exact ProseMirror content.",
+      'the exact ProseMirror content. format "html" (opt-in) gives Docmost\'s own ' +
+      "HTML, which keeps tabs, columns, status, colours, alignment and comment " +
+      "anchors that Markdown loses; it carries a note (as an HTML comment) when " +
+      "even HTML cannot represent something.",
     inputSchema: {
       pageId: z.string(),
       format: z
-        .enum(["markdown", "json"])
+        .enum(["markdown", "json", "html"])
         .optional()
-        .describe('"markdown" (default) or "json" for exact content'),
+        .describe('"markdown" (default), "json" for exact content, or "html"'),
     },
   },
   async ({ pageId, format }) => {
@@ -969,24 +1005,29 @@ server.registerTool(
   "create_page",
   {
     description:
-      "Create a new page from Markdown, optionally under a parent page. The " +
+      "Create a new page from Markdown (or HTML with format \"html\"), optionally under a parent page. The " +
       "title is set exactly as given. Reversible: delete_page moves it to the trash.",
     inputSchema: {
       title: z.string().describe("Title of the page"),
-      content: z.string().describe("Markdown content"),
+      content: z.string().describe("Content, in Markdown unless format is \"html\""),
       spaceId: z.string(),
       parentPageId: z
         .string()
         .optional()
         .describe("Optional parent page ID to nest under"),
+      format: z
+        .enum(["markdown", "html"])
+        .optional()
+        .describe('Format of content: "markdown" (default) or "html"'),
     },
   },
-  async ({ title, content, spaceId, parentPageId }) => {
+  async ({ title, content, spaceId, parentPageId, format }) => {
     const result = await docmostClient.createPage(
       title,
       content,
       spaceId,
       parentPageId,
+      format ?? "markdown",
     );
     return jsonContent(result);
   },
@@ -997,10 +1038,11 @@ server.registerTool(
   "update_page",
   {
     description:
-      "Update a page's title and/or Markdown content. A backup of the exact " +
+      "Update a page's title and/or content (Markdown, or HTML with format " +
+      '"html", e.g. edited from get_page format "html"). A backup of the exact ' +
       "page is saved before every change. To rename only, pass title and omit " +
       'content. operation "replace" (default) rewrites the whole body and is ' +
-      "refused if the page holds anything a Markdown rewrite would lose (the " +
+      "refused if the page holds anything a rewrite in that format would lose (the " +
       "error names it); pass force=true only to accept that loss. " +
       '"append" and "prepend" add content without touching existing blocks.',
     inputSchema: {
@@ -1009,7 +1051,7 @@ server.registerTool(
         .string()
         .optional()
         .describe(
-          "Markdown content. Omit (or leave empty) to change only the title.",
+          "New content in the given format. Omit (or leave empty) to change only the title.",
         ),
       title: z.string().optional().describe("Optional new title"),
       operation: z
@@ -1022,16 +1064,21 @@ server.registerTool(
         .boolean()
         .optional()
         .describe(
-          "replace only: overwrite even though content Markdown cannot represent will be lost",
+          "replace only: overwrite even though content the format cannot represent will be lost",
         ),
+      format: z
+        .enum(["markdown", "html"])
+        .optional()
+        .describe('Format of content: "markdown" (default) or "html"'),
     },
   },
-  async ({ pageId, content, title, operation, force }) => {
+  async ({ pageId, content, title, operation, force, format }) => {
     const result = await docmostClient.updatePage(pageId, {
       content,
       title,
       operation,
       force,
+      format,
     });
     return jsonContent(result);
   },

@@ -10,6 +10,8 @@
  */
 
 export interface TypeRule {
+  /** Every attribute round-trips exactly, except those listed in defaults. */
+  allAttrs?: boolean;
   /** Attributes whose value round-trips exactly, whatever it is. */
   preserved?: string[];
   /**
@@ -89,6 +91,43 @@ export const ALLOWED_MARKS: Record<string, TypeRule> = {
 };
 
 /**
+ * Allow-list for a replace written as HTML (Docmost's own HTML in, HTML
+ * out). Proven by tests/roundtrip.mjs in html>html mode against Docmost
+ * 0.97.0: these node types keep every attribute. Not here, so blocked:
+ * footnotes (Docmost's HTML export fails on them), attachment, audio, pdf
+ * and embed (numeric size, width and height come back as strings), and any
+ * type Docmost adds later. details loses open=true, as with Markdown.
+ */
+const ALL: TypeRule = { allAttrs: true };
+export const HTML_ALLOWED_NODES: Record<string, TypeRule> = Object.fromEntries([
+  ...[
+    "doc", "text", "paragraph", "heading", "blockquote", "bulletList", "orderedList",
+    "listItem", "taskList", "taskItem", "table", "tableRow", "tableHeader", "tableCell",
+    "codeBlock", "horizontalRule", "hardBreak", "callout", "detailsSummary",
+    "detailsContent", "image", "tabs", "tab", "tabLabel", "tabPanel", "columns",
+    "column", "status", "pageBreak", "mention", "mathInline", "mathBlock", "subpages",
+    "transclusionSource", "transclusionReference", "base", "drawio", "excalidraw",
+    "video", "youtube", "integrationCard", "integrationMention",
+  ].map((t) => [t, ALL]),
+  ["details", { allAttrs: true, defaults: { open: false } }],
+]);
+
+export const HTML_ALLOWED_MARKS: Record<string, TypeRule> = Object.fromEntries(
+  [
+    "bold", "italic", "code", "strike", "underline", "subscript", "superscript",
+    "link", "highlight", "textStyle", "comment",
+  ].map((t) => [t, ALL]),
+);
+
+/** The format a replace would be written in. */
+export type ContentFormat = "markdown" | "html";
+
+const RULES: Record<ContentFormat, { nodes: Record<string, TypeRule>; marks: Record<string, TypeRule> }> = {
+  markdown: { nodes: ALLOWED_NODES, marks: ALLOWED_MARKS },
+  html: { nodes: HTML_ALLOWED_NODES, marks: HTML_ALLOWED_MARKS },
+};
+
+/**
  * Attributes Docmost regenerates on every write (UniqueID on headings and
  * paragraphs). They never survive a rewrite of any kind, so they are reported
  * but do not block.
@@ -134,6 +173,7 @@ function checkAttrs(
     }
     if (rule.preserved?.includes(attr)) continue;
     const defaults = rule.defaults || {};
+    if (rule.allAttrs && !Object.hasOwn(defaults, attr)) continue;
     const lossy =
       Object.hasOwn(defaults, attr)
         ? JSON.stringify(value) !== JSON.stringify(defaults[attr]) &&
@@ -147,7 +187,8 @@ function checkAttrs(
   }
 }
 
-export function inspectContent(doc: any): ContentFindings {
+export function inspectContent(doc: any, format: ContentFormat = "markdown"): ContentFindings {
+  const rules = RULES[format];
   const nodes: Record<string, number> = {};
   const marks: Record<string, number> = {};
   const attrs = new Map<string, AttrFinding>();
@@ -163,7 +204,7 @@ export function inspectContent(doc: any): ContentFindings {
 
   const walk = (node: any) => {
     if (!node || typeof node !== "object") return;
-    const rule = ruleFor(ALLOWED_NODES, node.type);
+    const rule = ruleFor(rules.nodes, node.type);
     if (rule) checkAttrs(node.type, rule, node.attrs, attrs, counters);
     else nodes[node.type] = (nodes[node.type] || 0) + 1;
 
@@ -178,7 +219,7 @@ export function inspectContent(doc: any): ContentFindings {
     }
 
     for (const mark of nodeMarks) {
-      const markRule = ruleFor(ALLOWED_MARKS, mark.type);
+      const markRule = ruleFor(rules.marks, mark.type);
       if (markRule) checkAttrs(mark.type, markRule, mark.attrs, attrs, counters);
       else flagMark(mark.type);
     }
