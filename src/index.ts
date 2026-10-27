@@ -102,15 +102,18 @@ class DocmostClient {
     // Clamp limit between 1 and 100
     const clampedLimit = Math.max(1, Math.min(100, limit));
 
-    let page = 1;
+    // Docmost 0.97 uses cursor pagination (meta.nextCursor). Stop when there
+    // is no next cursor, and cap the page count so a server that ignores the
+    // cursor cannot loop forever.
+    const MAX_PAGES = 100;
     let allItems: T[] = [];
-    let hasNextPage = true;
+    let cursor: string | undefined;
 
-    while (hasNextPage) {
+    for (let i = 0; i < MAX_PAGES; i++) {
       const response = await this.client.post(endpoint, {
         ...basePayload,
         limit: clampedLimit,
-        page,
+        ...(cursor ? { cursor } : {}),
       });
 
       const data = response.data;
@@ -120,10 +123,15 @@ class DocmostClient {
       const meta = data.data?.meta || data.meta;
 
       allItems = allItems.concat(items);
-      hasNextPage = meta?.hasNextPage || false;
-      page++;
+      if (!meta?.hasNextPage || !meta?.nextCursor || meta.nextCursor === cursor) {
+        return allItems;
+      }
+      cursor = meta.nextCursor;
     }
 
+    console.error(
+      `paginateAll(${endpoint}): stopped after ${MAX_PAGES} pages; results may be incomplete`,
+    );
     return allItems;
   }
 
