@@ -75,6 +75,10 @@ again (including deleted ones) also expire; the sweep can remove a page's
 last backup. They contain full page content, so treat the directory as
 sensitive and include it in your own backups.
 
+A page Docmost returns without ProseMirror content (for example a new page
+that was never edited, whose content is `null`) cannot be checked or backed
+up, so every tool that changes it refuses.
+
 ## Usage with an MCP client
 
 ```json

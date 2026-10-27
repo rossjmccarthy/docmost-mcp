@@ -87,6 +87,15 @@ try {
   check("title-only rename keeps content and title is exact", r.ok && afterRename.title === renamed && JSON.stringify(afterRename.content) === JSON.stringify(before), r.ok ? "" : r.text);
   check("rename took a backup", (await backupsFor(newId)).length === 1);
 
+  // A page created without content: report how Docmost stores it, since
+  // writes fail closed unless the page has a ProseMirror document.
+  const empty = await tool.call("create_page", { title: `${PREFIX} empty page`, content: "", spaceId: TEST_SPACE_ID });
+  const emptyId = empty.json?.data?.id;
+  if (emptyId) created.push(emptyId);
+  const emptyInfo = emptyId ? await api.post("/pages/info", { pageId: emptyId }) : null;
+  const emptyRename = emptyId ? await tool.call("update_page", { pageId: emptyId, title: `${PREFIX} empty page (renamed)` }) : null;
+  console.log(`INFO  empty page content: ${JSON.stringify(emptyInfo?.content)?.slice(0, 80)}; rename ${emptyRename?.ok ? "allowed" : "refused: " + emptyRename?.text.slice(0, 90)}`);
+
   // F3: Markdown replace refused on pages with content Markdown cannot rebuild.
   for (const name of ["tabs", "columns", "status", "page-break", "embed", "mark-comment", "mixed-marks", "details-open", "attr-text-align"]) {
     const page = await apiPage(`guard ${name}`, fixture(name));

@@ -180,8 +180,36 @@ class DocmostClient {
   /** Raw /pages/info response data, with content as ProseMirror JSON. */
   async getPageRaw(pageId: string): Promise<any> {
     await this.ensureAuthenticated();
-    const response = await this.client.post("/pages/info", { pageId });
+    // Ask for JSON explicitly rather than relying on Docmost's default.
+    const response = await this.client.post("/pages/info", {
+      pageId,
+      includeContent: true,
+      format: "json",
+    });
     return response.data.data;
+  }
+
+  /**
+   * Fetch a page that is about to be changed. The guard and the backup both
+   * depend on its exact content, so fail closed unless Docmost returned a
+   * ProseMirror document.
+   */
+  async getPageForWrite(pageId: string): Promise<any> {
+    const page = await this.getPageRaw(pageId);
+    const content = page?.content;
+    if (
+      !content ||
+      typeof content !== "object" ||
+      Array.isArray(content) ||
+      content.type !== "doc"
+    ) {
+      throw new Error(
+        `Refusing to modify page ${pageId}: Docmost did not return its content ` +
+          `as a ProseMirror document, so it cannot be checked or backed up. ` +
+          `Nothing was changed.`,
+      );
+    }
+    return page;
   }
 
   async getPage(pageId: string, format: "markdown" | "json" = "markdown") {
@@ -274,7 +302,7 @@ class DocmostClient {
 
   /** Fetch and back up a page before mutating it. */
   async snapshot(pageId: string, operation: string) {
-    const page = await this.getPageRaw(pageId);
+    const page = await this.getPageForWrite(pageId);
     const backupFile = await this.backupPage(page, operation);
     return { page, backupFile };
   }
@@ -330,7 +358,7 @@ class DocmostClient {
       throw new Error("Nothing to update: provide content and/or title.");
     }
 
-    const page = await this.getPageRaw(pageId);
+    const page = await this.getPageForWrite(pageId);
 
     // Refuse to replace content that Markdown cannot rebuild exactly.
     if (content !== undefined && operation === "replace" && !force) {

@@ -113,6 +113,11 @@ export interface ContentFindings {
 
 const isUnset = (v: unknown) => v === null || v === undefined;
 
+// Own properties only, so a type named "constructor" or "toString" is not
+// mistaken for an allowed one via the object prototype.
+const ruleFor = (rules: Record<string, TypeRule>, type: unknown) =>
+  typeof type === "string" && Object.hasOwn(rules, type) ? rules[type] : undefined;
+
 function checkAttrs(
   type: string,
   rule: TypeRule,
@@ -128,7 +133,7 @@ function checkAttrs(
     if (rule.preserved?.includes(attr)) continue;
     const defaults = rule.defaults || {};
     const lossy =
-      attr in defaults
+      Object.hasOwn(defaults, attr)
         ? JSON.stringify(value) !== JSON.stringify(defaults[attr]) &&
           !(isUnset(value) && isUnset(defaults[attr]))
         : !isUnset(value);
@@ -148,9 +153,15 @@ export function inspectContent(doc: any): ContentFindings {
 
   const flagMark = (key: string) => (marks[key] = (marks[key] || 0) + 1);
 
+  // Anything that is not a ProseMirror document cannot be shown to be safe.
+  if (!doc || typeof doc !== "object" || doc.type !== "doc") {
+    nodes["(missing or invalid content)"] = 1;
+    return { nodes, marks, attrs: [], regeneratedIds: 0 };
+  }
+
   const walk = (node: any) => {
     if (!node || typeof node !== "object") return;
-    const rule = ALLOWED_NODES[node.type];
+    const rule = ruleFor(ALLOWED_NODES, node.type);
     if (rule) checkAttrs(node.type, rule, node.attrs, attrs, counters);
     else nodes[node.type] = (nodes[node.type] || 0) + 1;
 
@@ -165,7 +176,7 @@ export function inspectContent(doc: any): ContentFindings {
     }
 
     for (const mark of nodeMarks) {
-      const markRule = ALLOWED_MARKS[mark.type];
+      const markRule = ruleFor(ALLOWED_MARKS, mark.type);
       if (markRule) checkAttrs(mark.type, markRule, mark.attrs, attrs, counters);
       else flagMark(mark.type);
     }
