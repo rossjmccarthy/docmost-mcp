@@ -2,7 +2,7 @@
 // and tool names valid for MCP hubs. Run with: npm test
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtemp, readdir, stat, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, stat, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "path";
 import { ROOT, mcpServer } from "./lib.mjs";
@@ -86,7 +86,6 @@ async function fakeDocmost(content) {
 const pageId = "019e0000-0000-7000-8000-000000000001";
 for (const [label, content] of [
   ["no content field", "omit"],
-  ["null content", null],
   ["Markdown string content", "# hello"],
   ["non-doc object", { type: "paragraph" }],
 ]) {
@@ -114,6 +113,35 @@ for (const [label, content] of [
   fake.close();
   await check(`${label}: no write reached Docmost`, () => assert.deepEqual(fake.writes, []));
   await check(`${label}: no backup written`, async () => assert.deepEqual(await readdir(backupDir), []));
+}
+
+// A page that was never edited comes back with content: null. That is an
+// empty document: every tool may change it, and the backup records null.
+{
+  const fake = await fakeDocmost(null);
+  const backupDir = await mkdtemp(join(tmpdir(), "mcp-unit-"));
+  const srv = mcpServer({ DOCMOST_API_URL: fake.url, DOCMOST_EMAIL: "x", DOCMOST_PASSWORD: "x", DOCMOST_BACKUP_DIR: backupDir });
+  for (const [tool, args] of [
+    ["update_page", { pageId, title: "renamed" }],
+    ["update_page", { pageId, content: "new", operation: "replace" }],
+    ["update_page", { pageId, content: "new", operation: "append" }],
+    ["move_page", { pageId, parentPageId: null }],
+    ["delete_page", { pageId }],
+  ]) {
+    const r = await srv.call(tool, args);
+    await check(`null content: ${tool} ${args.operation || ""} allowed`, () => assert.equal(r.ok, true, r.text));
+  }
+  srv.close();
+  fake.close();
+  const files = await readdir(join(backupDir, pageId));
+  await check("null content: each change wrote a write and a backup of null", async () => {
+    assert.equal(fake.writes.length, 5);
+    assert.equal(files.length, 5);
+    for (const f of files) {
+      const saved = JSON.parse(await readFile(join(backupDir, pageId, f), "utf-8"));
+      assert.equal(saved.content, null);
+    }
+  });
 }
 
 // Backup folders are owner-only, and the startup sweep expires old backups

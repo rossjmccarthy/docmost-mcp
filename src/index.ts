@@ -192,10 +192,22 @@ class DocmostClient {
   /**
    * Fetch a page that is about to be changed. The guard and the backup both
    * depend on its exact content, so fail closed unless Docmost returned a
-   * ProseMirror document.
+   * ProseMirror document. The one exception is a page that was never edited:
+   * Docmost returns it with content present but null, which is an empty
+   * document (and is backed up as null).
    */
   async getPageForWrite(pageId: string): Promise<any> {
     const page = await this.getPageRaw(pageId);
+    if (
+      page &&
+      typeof page === "object" &&
+      page.id === pageId &&
+      typeof page.spaceId === "string" &&
+      Object.hasOwn(page, "content") &&
+      page.content === null
+    ) {
+      return { ...page, content: { type: "doc", content: [] }, storedContentWasNull: true };
+    }
     const content = page?.content;
     if (
       !content ||
@@ -290,7 +302,7 @@ class DocmostClient {
         icon: page.icon ?? null,
         operation,
         capturedAt: new Date().toISOString(),
-        content: page.content ?? null,
+        content: page.storedContentWasNull ? null : page.content ?? null,
       });
     } catch (err: any) {
       throw new Error(
