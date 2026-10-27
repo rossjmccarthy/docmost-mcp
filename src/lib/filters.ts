@@ -40,7 +40,7 @@ export function filterGroup(group: any) {
   };
 }
 
-export function filterPage(page: any, content?: string, subpages?: any[]) {
+export function filterPage(page: any, content?: unknown, subpages?: any[]) {
   return {
     id: page.id,
     title: page.title,
@@ -50,8 +50,8 @@ export function filterPage(page: any, content?: string, subpages?: any[]) {
     createdAt: page.createdAt,
     updatedAt: page.updatedAt,
     deletedAt: page.deletedAt,
-    // Include converted markdown content if valid string (even empty)
-    ...(typeof content === "string" && { content }),
+    // Markdown string (even empty) or exact ProseMirror JSON
+    ...(content !== undefined && { content }),
     // Include subpages if provided
     ...(subpages &&
       subpages.length > 0 && {

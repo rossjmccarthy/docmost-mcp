@@ -15,6 +15,11 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { performLogin } from "./lib/auth-utils.js";
 import { BackupStore } from "./lib/backup.js";
+import {
+  describeFindings,
+  inspectContent,
+  isLossy,
+} from "./lib/content-guard.js";
 
 // Read version from package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -46,32 +51,12 @@ const backups = new BackupStore(
   positiveInt(process.env.DOCMOST_BACKUP_MAX_AGE_DAYS, 90),
 );
 
-// Docmost node types the Markdown -> ProseMirror writer has no extension for.
-const UNREBUILDABLE_NODE_TYPES = new Set([
-  "callout",
-  "details",
-  "mention",
-  "attachment",
-  "drawio",
-  "excalidraw",
-  "embed",
-  "video",
-  "youtube",
-  "mathInline",
-  "mathBlock",
-  "subpages",
-]);
-
-function findUnrebuildableNodes(doc: any): string[] {
-  const found = new Set<string>();
-  const walk = (node: any) => {
-    if (!node) return;
-    if (UNREBUILDABLE_NODE_TYPES.has(node.type)) found.add(node.type);
-    (node.content || []).forEach(walk);
-  };
-  walk(doc);
-  return [...found].sort();
-}
+// Which converter get_page uses for Markdown: the fork's ProseMirror walker
+// ("fork", default) or Docmost's own export ("native"). tests/roundtrip.mjs
+// showed native drops underline, text colour and nested task items, so the
+// fork's converter is the one the allow-list is proven against.
+const MARKDOWN_READER =
+  process.env.DOCMOST_MARKDOWN_READER === "native" ? "native" : "fork";
 
 type ContentOperation = "replace" | "append" | "prepend";
 
@@ -199,38 +184,67 @@ class DocmostClient {
     return response.data.data;
   }
 
-  async getPage(pageId: string) {
+  async getPage(pageId: string, format: "markdown" | "json" = "markdown") {
     const resultData = await this.getPageRaw(pageId);
-
-    let content = resultData.content
-      ? convertProseMirrorToMarkdown(resultData.content)
-      : ""; // Default to empty string
+    const json = resultData.content ?? null;
 
     // Always fetch subpages to provide context to the agent
     let subpages: any[] = [];
-
     try {
       subpages = await this.listSidebarPages(resultData.spaceId, pageId);
     } catch (e: any) {
       console.error("Failed to fetch subpages:", e.message);
     }
 
-    // Resolve subpages if the placeholder exists
-    if (content && content.includes("{{SUBPAGES}}")) {
-      if (subpages && subpages.length > 0) {
-        const list = subpages
-          .map((p: any) => `- [${p.title}](page:${p.id})`)
-          .join("\n");
-        content = content.replace("{{SUBPAGES}}", `### Subpages\n${list}`);
-      } else {
-        content = content.replace("{{SUBPAGES}}", "");
-      }
+    if (format === "json") {
+      return {
+        data: filterPage(resultData, json, subpages),
+        success: true,
+      };
+    }
+
+    let content = "";
+    if (json) {
+      content =
+        MARKDOWN_READER === "fork"
+          ? convertProseMirrorToMarkdown(json)
+          : await this.getNativeMarkdown(pageId);
+    }
+
+    // Resolve subpages if the placeholder exists (fork converter only)
+    if (content.includes("{{SUBPAGES}}")) {
+      const list = subpages
+        .map((p: any) => `- [${p.title}](page:${p.id})`)
+        .join("\n");
+      content = content.replace(
+        "{{SUBPAGES}}",
+        list ? `### Subpages\n${list}` : "",
+      );
+    }
+
+    // Never let Markdown silently drop content: say what it cannot represent.
+    const findings = json ? inspectContent(json) : null;
+    if (findings && isLossy(findings)) {
+      content =
+        `> Note: this page contains content Markdown cannot represent exactly ` +
+        `(${describeFindings(findings)}). Use get_page with format "json" for ` +
+        `the exact content, and do not overwrite this page with Markdown.\n\n` +
+        content;
     }
 
     return {
       data: filterPage(resultData, content, subpages),
       success: true,
     };
+  }
+
+  async getNativeMarkdown(pageId: string): Promise<string> {
+    const response = await this.client.post("/pages/info", {
+      pageId,
+      format: "markdown",
+    });
+    const content = response.data.data?.content;
+    return typeof content === "string" ? content : "";
   }
 
   /**
@@ -318,15 +332,16 @@ class DocmostClient {
 
     const page = await this.getPageRaw(pageId);
 
-    // Refuse to replace content the writer cannot rebuild (before any write)
+    // Refuse to replace content that Markdown cannot rebuild exactly.
     if (content !== undefined && operation === "replace" && !force) {
-      const unsupported = findUnrebuildableNodes(page.content);
-      if (unsupported.length > 0) {
+      const findings = inspectContent(page.content);
+      if (isLossy(findings)) {
         throw new Error(
-          `Refusing to overwrite page ${pageId}: it contains node types that ` +
-            `cannot be rebuilt from Markdown and would be lost: ` +
-            `${unsupported.join(", ")}. Edit this page in Docmost, or pass ` +
-            `force=true to overwrite anyway (a backup is taken first).`,
+          `Refusing to replace page ${pageId}: it contains content that a ` +
+            `Markdown rewrite would lose or change: ${describeFindings(findings)}. ` +
+            `Use operation "append" or "prepend" to add content without touching ` +
+            `what is there, edit the page in Docmost, or pass force=true to ` +
+            `overwrite anyway (a backup is taken first).`,
         );
       }
     }
@@ -490,13 +505,21 @@ server.registerTool(
 server.registerTool(
   "get_page",
   {
-    description: "Get details and content of a specific page by ID",
+    description:
+      "Get a page's details and content. Read-only. Markdown (the default) is " +
+      "convenient but cannot represent every Docmost block; when it cannot, the " +
+      "content starts with a note naming what is missing. Use format \"json\" for " +
+      "the exact ProseMirror content.",
     inputSchema: {
       pageId: z.string(),
+      format: z
+        .enum(["markdown", "json"])
+        .optional()
+        .describe('"markdown" (default) or "json" for exact content'),
     },
   },
-  async ({ pageId }) => {
-    const page = await docmostClient.getPage(pageId);
+  async ({ pageId, format }) => {
+    const page = await docmostClient.getPage(pageId, format ?? "markdown");
     return jsonContent(page);
   },
 );
@@ -537,8 +560,8 @@ server.registerTool(
       "Update a page's title and/or Markdown content. A backup of the exact " +
       "page is saved before every change. To rename only, pass title and omit " +
       'content. operation "replace" (default) rewrites the whole body and is ' +
-      "refused if the page contains blocks Markdown cannot rebuild (the error " +
-      "names them); pass force=true only to accept that loss. " +
+      "refused if the page holds anything a Markdown rewrite would lose (the " +
+      "error names it); pass force=true only to accept that loss. " +
       '"append" and "prepend" add content without touching existing blocks.',
     inputSchema: {
       pageId: z.string().describe("ID of the page to update"),
@@ -559,7 +582,7 @@ server.registerTool(
         .boolean()
         .optional()
         .describe(
-          "replace only: overwrite even though blocks Markdown cannot rebuild will be lost",
+          "replace only: overwrite even though content Markdown cannot represent will be lost",
         ),
     },
   },
