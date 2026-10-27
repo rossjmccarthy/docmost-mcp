@@ -14,6 +14,7 @@ import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { performLogin } from "./lib/auth-utils.js";
+import { BackupStore } from "./lib/backup.js";
 
 // Read version from package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -34,6 +35,17 @@ if (!API_URL || !EMAIL || !PASSWORD) {
   process.exit(1);
 }
 
+const positiveInt = (value: string | undefined, fallback: number) => {
+  const n = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+const backups = new BackupStore(
+  process.env.DOCMOST_BACKUP_DIR,
+  positiveInt(process.env.DOCMOST_BACKUP_KEEP, 20),
+  positiveInt(process.env.DOCMOST_BACKUP_MAX_AGE_DAYS, 90),
+);
+
 // Docmost node types the Markdown -> ProseMirror writer has no extension for.
 const UNREBUILDABLE_NODE_TYPES = new Set([
   "callout",
@@ -49,6 +61,17 @@ const UNREBUILDABLE_NODE_TYPES = new Set([
   "mathBlock",
   "subpages",
 ]);
+
+function findUnrebuildableNodes(doc: any): string[] {
+  const found = new Set<string>();
+  const walk = (node: any) => {
+    if (!node) return;
+    if (UNREBUILDABLE_NODE_TYPES.has(node.type)) found.add(node.type);
+    (node.content || []).forEach(walk);
+  };
+  walk(doc);
+  return [...found].sort();
+}
 
 type ContentOperation = "replace" | "append" | "prepend";
 
@@ -169,10 +192,15 @@ class DocmostClient {
     return response.data?.data?.items || [];
   }
 
-  async getPage(pageId: string) {
+  /** Raw /pages/info response data, with content as ProseMirror JSON. */
+  async getPageRaw(pageId: string): Promise<any> {
     await this.ensureAuthenticated();
     const response = await this.client.post("/pages/info", { pageId });
-    const resultData = response.data.data; // Assuming data is nested under 'data'
+    return response.data.data;
+  }
+
+  async getPage(pageId: string) {
+    const resultData = await this.getPageRaw(pageId);
 
     let content = resultData.content
       ? convertProseMirrorToMarkdown(resultData.content)
@@ -184,7 +212,7 @@ class DocmostClient {
     try {
       subpages = await this.listSidebarPages(resultData.spaceId, pageId);
     } catch (e: any) {
-      console.warn("Failed to fetch subpages:", e);
+      console.error("Failed to fetch subpages:", e.message);
     }
 
     // Resolve subpages if the placeholder exists
@@ -201,8 +229,40 @@ class DocmostClient {
 
     return {
       data: filterPage(resultData, content, subpages),
-      success: response.data.success,
+      success: true,
     };
+  }
+
+  /**
+   * Save a pre-write snapshot of a page. Every mutation calls this first and
+   * must not proceed if it throws.
+   */
+  async backupPage(page: any, operation: string): Promise<string> {
+    try {
+      return await backups.save({
+        pageId: page.id,
+        title: page.title ?? null,
+        spaceId: page.spaceId,
+        parentPageId: page.parentPageId ?? null,
+        slugId: page.slugId,
+        icon: page.icon ?? null,
+        operation,
+        capturedAt: new Date().toISOString(),
+        content: page.content ?? null,
+      });
+    } catch (err: any) {
+      throw new Error(
+        `Aborted ${operation} of page ${page.id}: the pre-write backup could ` +
+          `not be saved (${err.message}). Nothing was changed.`,
+      );
+    }
+  }
+
+  /** Fetch and back up a page before mutating it. */
+  async snapshot(pageId: string, operation: string) {
+    const page = await this.getPageRaw(pageId);
+    const backupFile = await this.backupPage(page, operation);
+    return { page, backupFile };
   }
 
   /**
@@ -229,25 +289,9 @@ class DocmostClient {
   }
 
   /**
-   * Return the node types in a page's current ProseMirror JSON that the
-   * Markdown writer cannot rebuild, so overwriting would silently lose them.
-   */
-  async findUnrebuildableNodes(pageId: string): Promise<string[]> {
-    const response = await this.client.post("/pages/info", { pageId });
-    const found = new Set<string>();
-    const walk = (node: any) => {
-      if (!node) return;
-      if (UNREBUILDABLE_NODE_TYPES.has(node.type)) found.add(node.type);
-      (node.content || []).forEach(walk);
-    };
-    walk(response.data.data?.content);
-    return [...found].sort();
-  }
-
-  /**
    * Update a page's title and/or content with Docmost's native update
    * endpoint. replace rewrites the whole body and is guarded; append and
-   * prepend only add nodes.
+   * prepend only add nodes. Every call is preceded by a backup.
    */
   async updatePage(
     pageId: string,
@@ -258,8 +302,6 @@ class DocmostClient {
       force?: boolean;
     },
   ) {
-    await this.ensureAuthenticated();
-
     let { content } = options;
     const { title, force = false } = options;
     const operation = options.operation ?? "replace";
@@ -274,18 +316,25 @@ class DocmostClient {
       throw new Error("Nothing to update: provide content and/or title.");
     }
 
+    const page = await this.getPageRaw(pageId);
+
     // Refuse to replace content the writer cannot rebuild (before any write)
     if (content !== undefined && operation === "replace" && !force) {
-      const unsupported = await this.findUnrebuildableNodes(pageId);
+      const unsupported = findUnrebuildableNodes(page.content);
       if (unsupported.length > 0) {
         throw new Error(
           `Refusing to overwrite page ${pageId}: it contains node types that ` +
             `cannot be rebuilt from Markdown and would be lost: ` +
             `${unsupported.join(", ")}. Edit this page in Docmost, or pass ` +
-            `force=true to overwrite anyway.`,
+            `force=true to overwrite anyway (a backup is taken first).`,
         );
       }
     }
+
+    const backupFile = await this.backupPage(
+      page,
+      content === undefined ? "rename" : operation,
+    );
 
     const body: Record<string, unknown> = { pageId };
     if (title) body.title = title;
@@ -304,6 +353,7 @@ class DocmostClient {
         content === undefined
           ? "Page title updated."
           : `Page content ${operation === "replace" ? "replaced" : operation + "ed"}.`,
+      backup: backupFile,
     };
   }
 
@@ -335,35 +385,39 @@ class DocmostClient {
     parentPageId: string | null,
     position?: string,
   ) {
-    await this.ensureAuthenticated();
+    const { backupFile } = await this.snapshot(pageId, "move");
     // Docmost requires position >= 5 chars.
     const validPosition = position || "a00000";
 
-    return this.client
+    const result = await this.client
       .post("/pages/move", {
         pageId,
         parentPageId,
         position: validPosition,
       })
       .then((res) => res.data);
+    return { ...result, backup: backupFile };
   }
 
+  /** Move a page to the trash (soft delete; restorable in Docmost). */
   async deletePage(pageId: string) {
-    await this.ensureAuthenticated();
-    return this.client
-      .post("/pages/delete", { pageId })
-      .then((res) => res.data);
+    const { backupFile } = await this.snapshot(pageId, "delete");
+    await this.client.post("/pages/delete", { pageId });
+    return { backup: backupFile };
   }
 
   async deletePages(pageIds: string[]) {
-    await this.ensureAuthenticated();
-    const promises = pageIds.map((id) =>
-      this.client
-        .post("/pages/delete", { pageId: id })
-        .then(() => ({ id, success: true }))
-        .catch((err: any) => ({ id, success: false, error: err.message })),
-    );
-    return Promise.all(promises);
+    // Sequential so each page is backed up before it is trashed.
+    const results = [];
+    for (const id of pageIds) {
+      try {
+        const { backup } = await this.deletePage(id);
+        results.push({ id, success: true, backup });
+      } catch (err: any) {
+        results.push({ id, success: false, error: err.message });
+      }
+    }
+    return results;
   }
 }
 
@@ -453,7 +507,7 @@ server.registerTool(
   {
     description:
       "Create a new page from Markdown, optionally under a parent page. The " +
-      "title is set exactly as given.",
+      "title is set exactly as given. Reversible: delete_page moves it to the trash.",
     inputSchema: {
       title: z.string().describe("Title of the page"),
       content: z.string().describe("Markdown content"),
@@ -480,10 +534,11 @@ server.registerTool(
   "update_page",
   {
     description:
-      "Update a page's title and/or Markdown content. To rename only, pass " +
-      'title and omit content. operation "replace" (default) rewrites the whole ' +
-      "body and is refused if the page contains blocks Markdown cannot rebuild " +
-      "(the error names them) unless force=true, which discards them. " +
+      "Update a page's title and/or Markdown content. A backup of the exact " +
+      "page is saved before every change. To rename only, pass title and omit " +
+      'content. operation "replace" (default) rewrites the whole body and is ' +
+      "refused if the page contains blocks Markdown cannot rebuild (the error " +
+      "names them); pass force=true only to accept that loss. " +
       '"append" and "prepend" add content without touching existing blocks.',
     inputSchema: {
       pageId: z.string().describe("ID of the page to update"),
@@ -524,7 +579,8 @@ server.registerTool(
   "move_page",
   {
     description:
-      "Move a page to a new parent within its space, or to the space root.",
+      "Move a page to a new parent within its space, or to the space root. " +
+      "A backup is saved first. Reversible by moving it back.",
     inputSchema: {
       pageId: z.string(),
       parentPageId: z
@@ -548,12 +604,16 @@ server.registerTool(
     const finalParentId =
       parentPageId === "" || parentPageId === "null" ? null : parentPageId;
 
-    await docmostClient.movePage(pageId, finalParentId || null, position);
+    const result = await docmostClient.movePage(
+      pageId,
+      finalParentId || null,
+      position,
+    );
     return {
       content: [
         {
           type: "text",
-          text: `Successfully moved page ${pageId} to parent ${finalParentId || "root"}`,
+          text: `Moved page ${pageId} to parent ${finalParentId || "root"}. Backup: ${result.backup}`,
         },
       ],
     };
@@ -564,15 +624,22 @@ server.registerTool(
 server.registerTool(
   "delete_page",
   {
-    description: "Delete a single page by ID.",
+    description:
+      "Move a page to the Docmost trash (restorable from Docmost). A backup is " +
+      "saved first. Never deletes permanently.",
     inputSchema: {
       pageId: z.string(),
     },
   },
   async ({ pageId }) => {
-    await docmostClient.deletePage(pageId);
+    const result = await docmostClient.deletePage(pageId);
     return {
-      content: [{ type: "text", text: `Successfully deleted page ${pageId}` }],
+      content: [
+        {
+          type: "text",
+          text: `Moved page ${pageId} to the trash. Backup: ${result.backup}`,
+        },
+      ],
     };
   },
 );
@@ -581,7 +648,9 @@ server.registerTool(
 server.registerTool(
   "delete_pages",
   {
-    description: "Delete multiple pages at once. Useful for cleanup.",
+    description:
+      "Move several pages to the Docmost trash, one at a time, backing up each " +
+      "first. A page whose backup fails is skipped. Never deletes permanently.",
     inputSchema: {
       pageIds: z.array(z.string()),
     },
