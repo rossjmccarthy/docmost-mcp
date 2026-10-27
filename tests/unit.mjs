@@ -563,6 +563,50 @@ const toolServer = async (fake, extraEnv = {}) =>
     assert.equal(fake.requests.find((q) => q.url === "/pages/create").body.format, "html"));
 }
 
+// get_comments flattens comments (skipping deleted ones); reply_to_comment
+// posts plain text to the thread's first comment.
+{
+  const body = (t) => ({ type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: t }] }] });
+  const comments = {
+    root: { id: "root", pageId, parentCommentId: null, type: "inline", selection: "anchored words", content: body("Why?"), creator: { name: "Ross" }, createdAt: "t1", resolvedAt: null },
+    reply: { id: "reply", pageId, parentCommentId: "root", type: "inline", content: body("Because."), creator: { name: "Sláinte" }, createdAt: "t2", resolvedAt: "t3", resolvedBy: { name: "Ross" } },
+    gone: { id: "gone", pageId, parentCommentId: null, content: body("x"), deletedAt: "t4" },
+  };
+  const fake = await fakeApi({
+    "/comments": () => ({ items: Object.values(comments), meta: { hasNextPage: false } }),
+    "/comments/info": (b) => { if (!comments[b.commentId]) throw new Error("Comment not found"); return comments[b.commentId]; },
+    "/comments/create": (b) => ({ id: "new", ...b }),
+    "/pages/info": () => ({ id: pageId, spaceId: "s", title: "T", parentPageId: null, content: { type: "doc", content: [] } }),
+  });
+  const srv = await toolServer(fake);
+  const list = await srv.call("get_comments", { pageId });
+  const reply = await srv.call("reply_to_comment", { commentId: "reply", text: "First line\nsecond line\n\nNew paragraph" });
+  const empty = await srv.call("reply_to_comment", { commentId: "root", text: "  " });
+  srv.close();
+  fake.close();
+  const create = fake.requests.find((q) => q.url === "/comments/create").body;
+  await check("get_comments returns text, author, anchor and resolved state, not deleted ones", () => {
+    assert.equal(list.json.comments.length, 2);
+    assert.deepEqual(
+      { ...list.json.comments[0] },
+      { id: "root", parentCommentId: null, type: "inline", selection: "anchored words", text: "Why?", author: "Ross", createdAt: "t1", editedAt: null, resolved: false, resolvedAt: null, resolvedBy: null },
+    );
+    assert.equal(list.json.comments[1].resolvedBy, "Ross");
+  });
+  await check("reply_to_comment on a reply posts to the thread root as plain text", () => {
+    assert.equal(reply.ok, true, reply.text);
+    assert.equal(create.parentCommentId, "root");
+    assert.equal(create.type, "inline");
+    assert.deepEqual(JSON.parse(create.content).content.map((p) => p.content.map((n) => n.type)), [["text", "hardBreak", "text"], ["text"]]);
+    assert.match(reply.json.message, /posted to its thread/);
+    assert.match(reply.json.backup, /_comment-reply\.json$/);
+  });
+  await check("reply_to_comment refuses empty text without posting", () => {
+    assert.equal(empty.ok, false);
+    assert.equal(fake.requests.filter((q) => q.url === "/comments/create").length, 1);
+  });
+}
+
 // Backup folders are owner-only, and the startup sweep expires old backups
 // across all pages, including a page's newest once it is past the limit.
 {

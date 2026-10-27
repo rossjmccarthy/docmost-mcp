@@ -498,6 +498,75 @@ class DocmostClient {
     };
   }
 
+  /** A page's comments, oldest first, one page of results. */
+  async getComments(pageId: string, cursor?: string, limit?: number) {
+    const { items, nextCursor } = await this.listOnePage("/comments", { pageId }, cursor, limit);
+    return {
+      comments: items
+        .filter((c: any) => !c.deletedAt)
+        .map((c: any) => ({
+          id: c.id,
+          parentCommentId: c.parentCommentId ?? null,
+          type: c.type ?? null,
+          // The text the comment is anchored to (inline comments only).
+          selection: c.selection ?? null,
+          text: c.content ? convertProseMirrorToMarkdown(c.content).replace("{{SUBPAGES}}", "").trim() : "",
+          author: c.creator?.name ?? null,
+          createdAt: c.createdAt,
+          editedAt: c.editedAt ?? null,
+          resolved: !!c.resolvedAt,
+          resolvedAt: c.resolvedAt ?? null,
+          resolvedBy: c.resolvedBy?.name ?? null,
+        })),
+      nextCursor,
+    };
+  }
+
+  /**
+   * Reply in a comment's thread. Docmost only allows one level of replies,
+   * so a reply to a reply goes to the thread's first comment.
+   */
+  async replyToComment(commentId: string, text: string) {
+    if (!text.trim()) throw new Error("Nothing to post: the reply text is empty.");
+    await this.ensureAuthenticated();
+    const target = (await this.client.post("/comments/info", { commentId })).data?.data;
+    if (!target?.pageId) throw new Error(`Comment ${commentId} was not found.`);
+    let root = target;
+    if (target.parentCommentId) {
+      root = (await this.client.post("/comments/info", { commentId: target.parentCommentId })).data?.data;
+    }
+    const { backupFile } = await this.snapshot(target.pageId, "comment-reply");
+
+    // Plain text: blank lines separate paragraphs, single newlines are breaks.
+    const doc = {
+      type: "doc",
+      content: text.trim().split(/\n\s*\n/).map((para) => ({
+        type: "paragraph",
+        content: para.split("\n").flatMap((line, i) => [
+          ...(i ? [{ type: "hardBreak" }] : []),
+          ...(line ? [{ type: "text", text: line }] : []),
+        ]),
+      })),
+    };
+    const response = await this.client.post("/comments/create", {
+      pageId: target.pageId,
+      content: JSON.stringify(doc),
+      parentCommentId: root.id,
+      ...(root.type ? { type: root.type } : {}),
+    });
+    const created = response.data?.data ?? {};
+    return {
+      success: true,
+      commentId: created.id,
+      threadId: root.id,
+      pageId: target.pageId,
+      message:
+        (root.id !== commentId ? "That comment is a reply, so this was posted to its thread. " : "") +
+        "Posted as plain text. To remove it, delete it in Docmost.",
+      backup: backupFile,
+    };
+  }
+
   async listSidebarPages(spaceId: string, pageId: string) {
     await this.ensureAuthenticated();
     const response = await this.client.post("/pages/sidebar-pages", {
@@ -1379,6 +1448,38 @@ server.registerTool(
   },
   async ({ pageId, backup, restoreTitle }) =>
     jsonContent(await docmostClient.restorePageBackup(pageId, backup, restoreTitle ?? true)),
+);
+
+// Tool: get_comments
+server.registerTool(
+  "get_comments",
+  {
+    description:
+      "List a page's comments, oldest first: text, author, times, whether " +
+      "resolved, the thread it belongs to (parentCommentId), and for inline " +
+      "comments the page text it is anchored to (selection). Read-only. Returns " +
+      "nextCursor when there are more.",
+    inputSchema: { pageId: z.string(), ...pagingSchema },
+  },
+  async ({ pageId, cursor, limit }) =>
+    jsonContent(await docmostClient.getComments(pageId, cursor, limit)),
+);
+
+// Tool: reply_to_comment
+server.registerTool(
+  "reply_to_comment",
+  {
+    description:
+      "Post a plain-text reply in a comment's thread (a reply to a reply goes " +
+      "to that thread). Does not change the page; a page backup is saved anyway. " +
+      "Cannot create new comments anchored to page text, and cannot resolve or " +
+      "delete comments; do those in Docmost.",
+    inputSchema: {
+      commentId: z.string().describe("ID of the comment to reply to (from get_comments)"),
+      text: z.string().describe("Reply text; blank lines separate paragraphs"),
+    },
+  },
+  async ({ commentId, text }) => jsonContent(await docmostClient.replyToComment(commentId, text)),
 );
 
 async function run() {
