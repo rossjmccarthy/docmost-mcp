@@ -10,7 +10,10 @@
     "build": "tsc",
     "start": "node build/index.js",
     "watch": "tsc --watch",
-    "inspector": "npx @modelcontextprotocol/inspector --config mcp_config.json"
+    "inspector": "npx @modelcontextprotocol/inspector --config mcp_config.json",
+    "test:roundtrip": "npm run build && node tests/roundtrip.mjs",
+    "test": "npm run build && node tests/unit.mjs",
+    "test:acceptance": "npm run build && node tests/acceptance.mjs"
   },
   "keywords": [
     "mcp",
