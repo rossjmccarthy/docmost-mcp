@@ -1075,7 +1075,8 @@ const jsonContent = (data: any) => ({
 server.registerTool(
   "get_workspace",
   {
-    description: "Get the current Docmost workspace",
+    description:
+      "Get the workspace. Read-only.",
   },
   async () => {
     const workspace = await docmostClient.getWorkspace();
@@ -1087,7 +1088,8 @@ server.registerTool(
 server.registerTool(
   "list_spaces",
   {
-    description: "List all available spaces in Docmost",
+    description:
+      "List spaces. Read-only.",
   },
   async () => {
     const spaces = await docmostClient.getSpaces();
@@ -1099,7 +1101,8 @@ server.registerTool(
 server.registerTool(
   "list_groups",
   {
-    description: "List all available groups in Docmost",
+    description:
+      "List groups. Read-only.",
   },
   async () => {
     const groups = await docmostClient.getGroups();
@@ -1111,7 +1114,8 @@ server.registerTool(
 server.registerTool(
   "list_pages",
   {
-    description: "List pages in a space ordered by updatedAt (descending).",
+    description:
+      "List a space's pages, most recently updated first. Read-only.",
     inputSchema: {
       spaceId: z.string().optional(),
     },
@@ -1127,19 +1131,12 @@ server.registerTool(
   "get_page",
   {
     description:
-      "Get a page's details and content. Read-only. Markdown (the default) is " +
-      "convenient but cannot represent every Docmost block; when it cannot, the " +
-      "content starts with a note naming what is missing. Use format \"json\" for " +
-      'the exact ProseMirror content. format "html" (opt-in) gives Docmost\'s own ' +
-      "HTML, which keeps tabs, columns, status, colours, alignment and comment " +
-      "anchors that Markdown loses; it carries a note (as an HTML comment) when " +
-      "even HTML cannot represent something.",
+      "Get a page. Read-only. format: markdown (default; starts with a note if anything is lost), json (exact), or html (keeps tabs, columns, status, colours; notes in an HTML comment what it loses).",
     inputSchema: {
       pageId: z.string(),
       format: z
         .enum(["markdown", "json", "html"])
-        .optional()
-        .describe('"markdown" (default), "json" for exact content, or "html"'),
+        .optional(),
     },
   },
   async ({ pageId, format }) => {
@@ -1153,20 +1150,17 @@ server.registerTool(
   "create_page",
   {
     description:
-      "Create a new page from Markdown (or HTML with format \"html\"), optionally under a parent page. The " +
-      "title is set exactly as given. Reversible: delete_page moves it to the trash.",
+      "Create a page from Markdown or HTML, optionally under a parent. Title kept exactly. Undo: delete_page.",
     inputSchema: {
-      title: z.string().describe("Title of the page"),
-      content: z.string().describe("Content, in Markdown unless format is \"html\""),
+      title: z.string(),
+      content: z.string().describe("Markdown, or HTML if format is html"),
       spaceId: z.string(),
       parentPageId: z
         .string()
-        .optional()
-        .describe("Optional parent page ID to nest under"),
+        .optional(),
       format: z
         .enum(["markdown", "html"])
-        .optional()
-        .describe('Format of content: "markdown" (default) or "html"'),
+        .optional(),
     },
   },
   async ({ title, content, spaceId, parentPageId, format }) => {
@@ -1186,38 +1180,24 @@ server.registerTool(
   "update_page",
   {
     description:
-      "Update a page's title and/or content (Markdown, or HTML with format " +
-      '"html", e.g. edited from get_page format "html"). A backup of the exact ' +
-      "page is saved before every change. To rename only, pass title and omit " +
-      'content. operation "replace" (default) rewrites the whole body and is ' +
-      "refused if the page holds anything a rewrite in that format would lose (the " +
-      "error names it); pass force=true only to accept that loss. " +
-      '"append" and "prepend" add content without touching existing blocks.',
+      "Change a page's title and/or content (Markdown or HTML). Omit content to rename. replace (default) is refused, naming the content, if the format would lose anything on the page; force=true overrides. append/prepend never touch existing content. Backed up first; undo: restore_page_backup.",
     inputSchema: {
-      pageId: z.string().describe("ID of the page to update"),
+      pageId: z.string(),
       content: z
         .string()
         .optional()
-        .describe(
-          "New content in the given format. Omit (or leave empty) to change only the title.",
-        ),
-      title: z.string().optional().describe("Optional new title"),
+        .describe("Omit to rename only"),
+      title: z.string().optional(),
       operation: z
         .enum(["replace", "append", "prepend"])
-        .optional()
-        .describe(
-          '"replace" (default) the whole body, or "append"/"prepend" the content',
-        ),
+        .optional(),
       force: z
         .boolean()
         .optional()
-        .describe(
-          "replace only: overwrite even though content the format cannot represent will be lost",
-        ),
+        .describe("replace: accept the named loss"),
       format: z
         .enum(["markdown", "html"])
-        .optional()
-        .describe('Format of content: "markdown" (default) or "html"'),
+        .optional(),
     },
   },
   async ({ pageId, content, title, operation, force, format }) => {
@@ -1237,23 +1217,18 @@ server.registerTool(
   "move_page",
   {
     description:
-      "Move a page to a new parent within its space, or to the space root. " +
-      "A backup is saved first. Reversible by moving it back.",
+      "Move a page within its space, under a parent or to the root. Backed up first. Undo: move it back.",
     inputSchema: {
       pageId: z.string(),
       parentPageId: z
         .string()
         .nullable()
         .optional()
-        .describe(
-          "Target parent page ID. Pass 'null' or empty string to move to root.",
-        ),
+        .describe("Omit, null or '' for the root"),
       position: z
         .string()
         .optional()
-        .describe(
-          "Optional position string (5-12 chars). Defaults to 'a00000' (end) if omitted.",
-        ),
+        .describe("Sort key, 5-12 chars (default: end)"),
     },
   },
   async ({ pageId, parentPageId, position }) => {
@@ -1283,8 +1258,7 @@ server.registerTool(
   "delete_page",
   {
     description:
-      "Move a page to the Docmost trash (restorable from Docmost). A backup is " +
-      "saved first. Never deletes permanently.",
+      "Move a page to the trash, never permanently. Backed up first. Undo: restore_page.",
     inputSchema: {
       pageId: z.string(),
     },
@@ -1307,8 +1281,7 @@ server.registerTool(
   "delete_pages",
   {
     description:
-      "Move several pages to the Docmost trash, one at a time, backing up each " +
-      "first. A page whose backup fails is skipped. Never deletes permanently.",
+      "Move pages to the trash, never permanently; skips any whose backup fails. Undo: restore_page.",
     inputSchema: {
       pageIds: z.array(z.string()),
     },
@@ -1323,27 +1296,28 @@ server.registerTool(
 server.registerTool(
   "search",
   {
-    description: "Search for pages and content. Read-only.",
+    description:
+      "Search pages. Read-only.",
     inputSchema: {
-      query: z.string().describe("Search query"),
-      spaceId: z.string().optional().describe("Optional space ID to filter by"),
+      query: z.string(),
+      spaceId: z.string().optional(),
       titleOnly: z
         .boolean()
         .optional()
-        .describe("Match page titles only, not page content"),
+        .describe("Titles only"),
       limit: z
         .number()
         .int()
         .min(1)
         .max(100)
         .optional()
-        .describe("Maximum results to return (Docmost default 25)"),
+        .describe("Default 25"),
       offset: z
         .number()
         .int()
         .min(0)
         .optional()
-        .describe("Number of results to skip, for paging"),
+        .describe("Results to skip"),
     },
   },
   async ({ query, spaceId, titleOnly, limit, offset }) => {
@@ -1362,13 +1336,10 @@ server.registerTool(
   "list_child_pages",
   {
     description:
-      "List the direct children of a page (pass pageId), or the top-level pages " +
-      "of a space (pass spaceId only), in sidebar order, with whether each has " +
-      "children of its own. Read-only. Use it to walk the page tree; list_pages " +
-      "is a flat recently-updated list instead.",
+      "List a page's children (pageId) or a space's top-level pages (spaceId), in tree order. Read-only.",
     inputSchema: {
-      pageId: z.string().optional().describe("Parent page ID"),
-      spaceId: z.string().optional().describe("Space ID, to list its root pages (ignored if pageId is set)"),
+      pageId: z.string().optional(),
+      spaceId: z.string().optional(),
     },
   },
   async ({ pageId, spaceId }) => jsonContent(await docmostClient.listChildPages({ pageId, spaceId })),
@@ -1379,8 +1350,7 @@ server.registerTool(
   "get_breadcrumbs",
   {
     description:
-      "Get a page's location: its ancestors from the space root down, ending " +
-      "with the page itself. Read-only.",
+      "Get a page's ancestors, root first, ending with the page. Read-only.",
     inputSchema: { pageId: z.string() },
   },
   async ({ pageId }) => jsonContent(await docmostClient.getBreadcrumbs(pageId)),
@@ -1391,8 +1361,7 @@ server.registerTool(
   "get_space",
   {
     description:
-      "Get one space's details (name, slug, description, visibility, member " +
-      "count). Read-only; does not list or change members.",
+      "Get a space's details and member count. Read-only.",
     inputSchema: { spaceId: z.string() },
   },
   async ({ spaceId }) => jsonContent(await docmostClient.getSpace(spaceId)),
@@ -1400,8 +1369,8 @@ server.registerTool(
 
 // Pagination arguments shared by tools that return one page of a long list.
 const pagingSchema = {
-  cursor: z.string().optional().describe("nextCursor from the previous call, for the next page"),
-  limit: z.number().int().min(1).max(100).optional().describe("Items per page (default 50)"),
+  cursor: z.string().optional().describe("nextCursor from the last call"),
+  limit: z.number().int().min(1).max(100).optional().describe("Default 50"),
 };
 
 // Tool: get_page_history
@@ -1409,10 +1378,7 @@ server.registerTool(
   "get_page_history",
   {
     description:
-      "List the versions Docmost saved for a page, newest first (historyId, " +
-      "title, time, who edited). Read-only. Docmost does not save a version for " +
-      "every change, so this is not a reliable undo for MCP edits; use " +
-      "list_page_backups for that. Returns nextCursor when there are more.",
+      "List Docmost's saved versions of a page, newest first. Read-only. Not every change is saved; to undo MCP edits use list_page_backups.",
     inputSchema: { pageId: z.string(), ...pagingSchema },
   },
   async ({ pageId, cursor, limit }) =>
@@ -1424,11 +1390,10 @@ server.registerTool(
   "get_page_version",
   {
     description:
-      "Get the content of one saved version from get_page_history. Read-only. " +
-      'Markdown by default (with a note if it cannot represent everything), or format "json" for the exact content.',
+      "Get one version from get_page_history, as Markdown (default; notes losses) or json. Read-only.",
     inputSchema: {
       historyId: z.string(),
-      format: z.enum(["markdown", "json"]).optional().describe('"markdown" (default) or "json"'),
+      format: z.enum(["markdown", "json"]).optional(),
     },
   },
   async ({ historyId, format }) =>
@@ -1440,8 +1405,7 @@ server.registerTool(
   "list_trash",
   {
     description:
-      "List the pages in a space's trash (id, title, when and by whom deleted). " +
-      "Read-only. Returns nextCursor when there are more.",
+      "List a space's trashed pages. Read-only.",
     inputSchema: { spaceId: z.string(), ...pagingSchema },
   },
   async ({ spaceId, cursor, limit }) =>
@@ -1453,9 +1417,7 @@ server.registerTool(
   "restore_page",
   {
     description:
-      "Restore a page from the trash, together with the pages under it. If its " +
-      "parent is still in the trash it goes to the space root. A backup is " +
-      "saved first. Reversible: delete_page moves it back to the trash.",
+      "Restore a page and its subpages from the trash (to the space root if its parent is still trashed). Backed up first. Undo: delete_page.",
     inputSchema: { pageId: z.string() },
   },
   async ({ pageId }) => jsonContent(await docmostClient.restorePage(pageId)),
@@ -1466,14 +1428,10 @@ server.registerTool(
   "move_page_to_space",
   {
     description:
-      "Move a page to another space. All pages under it move with it, and it " +
-      "lands at the root of the target space. Content is unchanged, and links " +
-      "and the page ID keep working. A backup is saved first, and the result " +
-      "gives the old space and parent so it can be moved back (move_page_to_space, " +
-      "then move_page). To copy instead, use duplicate_page with spaceId.",
+      "Move a page and its subpages to the root of another space; content, ID and links unchanged. Refuses its own space. Backed up first; the result gives the old place. Undo: move it back, then move_page.",
     inputSchema: {
       pageId: z.string(),
-      spaceId: z.string().describe("Target space ID"),
+      spaceId: z.string(),
     },
   },
   async ({ pageId, spaceId }) => jsonContent(await docmostClient.movePageToSpace(pageId, spaceId)),
@@ -1484,13 +1442,10 @@ server.registerTool(
   "duplicate_page",
   {
     description:
-      "Copy a page and all pages under it. Without spaceId the copy is titled " +
-      '"Copy of ..." and placed right after the original; with spaceId it is ' +
-      "copied into that space at its root with the same title. The original is " +
-      "not changed. Returns newPageId. Reversible: delete_page the copy.",
+      "Copy a page and its subpages: in the same space as \"Copy of ...\", or with spaceId to that space's root. Original unchanged. Undo: delete_page the copy.",
     inputSchema: {
       pageId: z.string(),
-      spaceId: z.string().optional().describe("Copy into this space instead of the same one"),
+      spaceId: z.string().optional().describe("Target space (default: same)"),
     },
   },
   async ({ pageId, spaceId }) => jsonContent(await docmostClient.duplicatePage(pageId, spaceId)),
@@ -1501,10 +1456,7 @@ server.registerTool(
   "list_page_backups",
   {
     description:
-      "List this server's own backups of a page, newest first. One is saved " +
-      "before every change made through these tools; each is the page as it " +
-      "was just before the operation named in takenBefore. Read-only. Backups " +
-      "expire after the configured age (default 90 days).",
+      "List this server's backups of a page, newest first, each taken before the named operation. Read-only. Kept 90 days by default.",
     inputSchema: { pageId: z.string() },
   },
   async ({ pageId }) => jsonContent(await docmostClient.listPageBackups(pageId)),
@@ -1515,14 +1467,11 @@ server.registerTool(
   "restore_page_backup",
   {
     description:
-      "Put a page's content (exact JSON) and title back to one of its backups " +
-      "from list_page_backups. The current state is backed up first, so this is " +
-      "itself reversible. Does not move the page; if it has moved since, the " +
-      "result says where it was. A page in the trash must be restore_page'd first.",
+      "Restore a page's content (exact) and title from a list_page_backups entry. Backs up the current state first; undo by restoring that. Does not move the page. Refuses trashed pages (restore_page first).",
     inputSchema: {
       pageId: z.string(),
-      backup: z.string().describe("Backup file name from list_page_backups"),
-      restoreTitle: z.boolean().optional().describe("Also restore the title (default true)"),
+      backup: z.string().describe("Name from list_page_backups"),
+      restoreTitle: z.boolean().optional().describe("Default true"),
     },
   },
   async ({ pageId, backup, restoreTitle }) =>
@@ -1534,10 +1483,7 @@ server.registerTool(
   "get_comments",
   {
     description:
-      "List a page's comments, oldest first: text, author, times, whether " +
-      "resolved, the thread it belongs to (parentCommentId), and for inline " +
-      "comments the page text it is anchored to (selection). Read-only. Returns " +
-      "nextCursor when there are more.",
+      "List a page's comments, oldest first, with author, resolved state, thread, and the text inline comments anchor to. Read-only.",
     inputSchema: { pageId: z.string(), ...pagingSchema },
   },
   async ({ pageId, cursor, limit }) =>
@@ -1549,13 +1495,10 @@ server.registerTool(
   "reply_to_comment",
   {
     description:
-      "Post a plain-text reply in a comment's thread (a reply to a reply goes " +
-      "to that thread). Does not change the page; a page backup is saved anyway. " +
-      "Cannot create new comments anchored to page text, and cannot resolve or " +
-      "delete comments; do those in Docmost.",
+      "Reply in a comment's thread, plain text. Page unchanged. Cannot anchor, resolve or delete comments. Undo: delete it in Docmost.",
     inputSchema: {
-      commentId: z.string().describe("ID of the comment to reply to (from get_comments)"),
-      text: z.string().describe("Reply text; blank lines separate paragraphs"),
+      commentId: z.string(),
+      text: z.string().describe("Blank lines separate paragraphs"),
     },
   },
   async ({ commentId, text }) => jsonContent(await docmostClient.replyToComment(commentId, text)),
@@ -1565,7 +1508,8 @@ server.registerTool(
 server.registerTool(
   "list_page_labels",
   {
-    description: "List a page's labels (id and name). Read-only.",
+    description:
+      "List a page's labels. Read-only.",
     inputSchema: { pageId: z.string() },
   },
   async ({ pageId }) => jsonContent(await docmostClient.listPageLabels(pageId)),
@@ -1576,12 +1520,10 @@ server.registerTool(
   "add_page_labels",
   {
     description:
-      "Add labels to a page (up to 25 at once). Docmost lower-cases names; they " +
-      "may contain letters, digits, - _ and ~ (not first). Returns the page's " +
-      "labels afterwards. Does not change page content. Reversible with remove_page_label.",
+      "Add up to 25 labels (lower-cased; letters, digits, - _ ~). Content unchanged. Undo: remove_page_label.",
     inputSchema: {
       pageId: z.string(),
-      names: z.array(z.string()).min(1).max(25).describe("Label names to add"),
+      names: z.array(z.string()).min(1).max(25),
     },
   },
   async ({ pageId, names }) => jsonContent(await docmostClient.addPageLabels(pageId, names)),
@@ -1592,8 +1534,7 @@ server.registerTool(
   "remove_page_label",
   {
     description:
-      "Remove one label from a page, by label id from list_page_labels. Does not " +
-      "delete the label elsewhere or change page content. Reversible with add_page_labels.",
+      "Remove a label (id from list_page_labels). Undo: add_page_labels.",
     inputSchema: { pageId: z.string(), labelId: z.string() },
   },
   async ({ pageId, labelId }) => jsonContent(await docmostClient.removePageLabel(pageId, labelId)),
@@ -1604,8 +1545,7 @@ server.registerTool(
   "get_backlinks",
   {
     description:
-      'List the pages that link to a page (direction "incoming", the default) ' +
-      'or that it links to ("outgoing"). Read-only. Returns nextCursor when there are more.',
+      "List pages linking to a page (incoming, default) or from it (outgoing). Read-only.",
     inputSchema: {
       pageId: z.string(),
       direction: z.enum(["incoming", "outgoing"]).optional(),
@@ -1621,11 +1561,10 @@ server.registerTool(
   "add_page_comment",
   {
     description:
-      'Add a plain-text comment to a page as a whole, prefixed "[Claude] ". Does ' +
-      "not change the page. Cannot anchor to page text. Undo: delete it in Docmost.",
+      "Comment on a page as a whole, plain text, prefixed \"[Claude] \". Page unchanged. Cannot anchor to text. Undo: delete it in Docmost.",
     inputSchema: {
       pageId: z.string(),
-      text: z.string().describe("Comment text; blank lines separate paragraphs"),
+      text: z.string().describe("Blank lines separate paragraphs"),
     },
   },
   async ({ pageId, text }) => jsonContent(await docmostClient.addPageComment(pageId, text)),
