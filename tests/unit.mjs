@@ -361,6 +361,36 @@ const toolServer = async (fake, extraEnv = {}) =>
     assert.deepEqual(js.json.content, statusDoc));
 }
 
+// list_trash pages through the trash; restore_page backs up, refuses a page
+// that is not in the trash, and says when the page lands at the root.
+{
+  const doc = { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "x" }] }] };
+  let deletedAt = "2026-10-27T10:00:00Z";
+  const fake = await fakeApi({
+    "/pages/trash": () => ({ items: [{ id: pageId, title: "Gone", parentPageId: "p", deletedAt, deletedBy: { name: "Ross" } }], meta: { hasNextPage: false } }),
+    "/pages/info": () => ({ id: pageId, spaceId: "s", title: "Gone", parentPageId: "p", deletedAt, content: doc }),
+    "/pages/restore": () => { deletedAt = null; return { id: pageId, title: "Gone", parentPageId: null }; },
+  });
+  const srv = await toolServer(fake);
+  const trash = await srv.call("list_trash", { spaceId: "s" });
+  const restored = await srv.call("restore_page", { pageId });
+  const again = await srv.call("restore_page", { pageId });
+  srv.close();
+  fake.close();
+  await check("list_trash returns trashed pages with who deleted them", () =>
+    assert.deepEqual(trash.json, { pages: [{ id: pageId, title: "Gone", parentPageId: "p", deletedAt: "2026-10-27T10:00:00Z", deletedBy: "Ross" }], nextCursor: null }));
+  await check("restore_page backs up, restores and reports the move to the root", () => {
+    assert.equal(restored.ok, true, restored.text);
+    assert.match(restored.json.backup, /_restore\.json$/);
+    assert.match(restored.json.message, /now at the space root/);
+  });
+  await check("restore_page refuses a page that is not in the trash", () => {
+    assert.equal(again.ok, false);
+    assert.match(again.text, /not in the trash/);
+    assert.equal(fake.requests.filter((q) => q.url === "/pages/restore").length, 1);
+  });
+}
+
 // Backup folders are owner-only, and the startup sweep expires old backups
 // across all pages, including a page's newest once it is past the limit.
 {

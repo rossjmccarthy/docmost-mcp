@@ -295,6 +295,46 @@ class DocmostClient {
     };
   }
 
+  /** Pages in a space's trash, one page of results. */
+  async listTrash(spaceId: string, cursor?: string, limit?: number) {
+    const { items, nextCursor } = await this.listOnePage("/pages/trash", { spaceId }, cursor, limit);
+    return {
+      pages: items.map((p: any) => ({
+        id: p.id,
+        title: p.title,
+        parentPageId: p.parentPageId ?? null,
+        deletedAt: p.deletedAt,
+        deletedBy: p.deletedBy?.name ?? null,
+      })),
+      nextCursor,
+    };
+  }
+
+  /**
+   * Restore a page from the trash, with the pages under it. If its parent is
+   * still in the trash, Docmost puts it at the space root instead.
+   */
+  async restorePage(pageId: string) {
+    const page = await this.getPageForWrite(pageId);
+    if (!page.deletedAt) {
+      throw new Error(`Page ${pageId} is not in the trash, so there is nothing to restore.`);
+    }
+    const backupFile = await this.backupPage(page, "restore");
+    const response = await this.client.post("/pages/restore", { pageId });
+    const restored = response.data?.data ?? {};
+    const detached = !!page.parentPageId && !restored.parentPageId;
+    return {
+      success: true,
+      pageId,
+      title: restored.title ?? page.title,
+      parentPageId: restored.parentPageId ?? null,
+      message:
+        "Restored from the trash, with any pages under it." +
+        (detached ? " Its parent is still in the trash, so it is now at the space root." : ""),
+      backup: backupFile,
+    };
+  }
+
   async listSidebarPages(spaceId: string, pageId: string) {
     await this.ensureAuthenticated();
     const response = await this.client.post("/pages/sidebar-pages", {
@@ -1036,6 +1076,32 @@ server.registerTool(
   },
   async ({ historyId, format }) =>
     jsonContent(await docmostClient.getPageVersion(historyId, format ?? "markdown")),
+);
+
+// Tool: list_trash
+server.registerTool(
+  "list_trash",
+  {
+    description:
+      "List the pages in a space's trash (id, title, when and by whom deleted). " +
+      "Read-only. Returns nextCursor when there are more.",
+    inputSchema: { spaceId: z.string(), ...pagingSchema },
+  },
+  async ({ spaceId, cursor, limit }) =>
+    jsonContent(await docmostClient.listTrash(spaceId, cursor, limit)),
+);
+
+// Tool: restore_page
+server.registerTool(
+  "restore_page",
+  {
+    description:
+      "Restore a page from the trash, together with the pages under it. If its " +
+      "parent is still in the trash it goes to the space root. A backup is " +
+      "saved first. Reversible: delete_page moves it back to the trash.",
+    inputSchema: { pageId: z.string() },
+  },
+  async ({ pageId }) => jsonContent(await docmostClient.restorePage(pageId)),
 );
 
 async function run() {
