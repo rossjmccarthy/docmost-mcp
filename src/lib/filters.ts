@@ -69,6 +69,11 @@ export function filterSearchResult(result: any) {
     updatedAt: result.updatedAt,
     rank: result.rank,
     highlight: result.highlight,
+    // Only worth the tokens when short; highlight already carries context.
+    ...(typeof result.matchedText === "string" &&
+    result.matchedText.length <= 200
+      ? { matchedText: result.matchedText }
+      : {}),
     spaceId: result.space?.id,
     spaceName: result.space?.name,
   };

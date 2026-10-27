@@ -349,15 +349,21 @@ class DocmostClient {
     };
   }
 
-  async search(query: string, spaceId?: string) {
+  async search(
+    query: string,
+    options: {
+      spaceId?: string;
+      titleOnly?: boolean;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) {
     await this.ensureAuthenticated();
-    const response = await this.client.post("/search", {
-      query,
-      spaceId,
-    });
+    const response = await this.client.post("/search", { query, ...options });
 
-    // Filter search results (data is directly an array)
-    const items = response.data?.data || [];
+    // Docmost 0.80 returned data as an array; 0.97 wraps it in data.items
+    const data = response.data?.data;
+    const items = Array.isArray(data) ? data : data?.items || [];
     const filteredItems = items.map((item: any) => filterSearchResult(item));
 
     return {
@@ -625,14 +631,36 @@ server.registerTool(
 server.registerTool(
   "search",
   {
-    description: "Search for pages and content.",
+    description: "Search for pages and content. Read-only.",
     inputSchema: {
       query: z.string().describe("Search query"),
       spaceId: z.string().optional().describe("Optional space ID to filter by"),
+      titleOnly: z
+        .boolean()
+        .optional()
+        .describe("Match page titles only, not page content"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Maximum results to return (Docmost default 25)"),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Number of results to skip, for paging"),
     },
   },
-  async ({ query, spaceId }) => {
-    const result = await docmostClient.search(query, spaceId);
+  async ({ query, spaceId, titleOnly, limit, offset }) => {
+    const result = await docmostClient.search(query, {
+      spaceId,
+      titleOnly,
+      limit,
+      offset,
+    });
     return jsonContent(result);
   },
 );
