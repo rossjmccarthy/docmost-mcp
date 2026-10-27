@@ -637,6 +637,57 @@ const toolServer = async (fake, extraEnv = {}) =>
   });
 }
 
+// A 401 logs in again and retries the request once; a second 401 fails
+// (no loop) without leaking the token.
+async function sessionFake({ alwaysReject }) {
+  let logins = 0;
+  let valid = null;
+  const calls = [];
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/api/auth/login") {
+        logins++;
+        valid = `tok${logins}`;
+        res.setHeader("set-cookie", `authToken=${valid}; Path=/`);
+        return res.end("{}");
+      }
+      calls.push(req.headers.authorization);
+      // The first session expires after login: only a fresh token works.
+      if (alwaysReject || req.headers.authorization !== `Bearer ${valid}` || logins === 1) {
+        res.statusCode = 401;
+        return res.end(JSON.stringify({ message: "Unauthorized" }));
+      }
+      res.end(JSON.stringify({ success: true, data: { id: "s", name: "Inbox" } }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${server.address().port}/api`, calls, logins: () => logins, close: () => server.close() };
+}
+for (const alwaysReject of [false, true]) {
+  const fake = await sessionFake({ alwaysReject });
+  const srv = await toolServer(fake);
+  const r = await srv.call("get_space", { spaceId: "s" });
+  srv.close();
+  fake.close();
+  if (!alwaysReject) {
+    await check("a 401 logs in again and retries once with the new token", () => {
+      assert.equal(r.ok, true, r.text);
+      assert.equal(fake.logins(), 2);
+      assert.deepEqual(fake.calls, ["Bearer tok1", "Bearer tok2"]);
+    });
+  } else {
+    await check("a second 401 is reported, after one re-login and one retry", () => {
+      assert.equal(r.ok, false);
+      assert.match(r.text, /HTTP 401/);
+      assert.doesNotMatch(r.text, /tok\d/);
+      assert.equal(fake.logins(), 2);
+      assert.equal(fake.calls.length, 2);
+    });
+  }
+}
+
 // Labels and backlinks; and a Docmost refusal comes back with Docmost's
 // reason, never the token.
 {

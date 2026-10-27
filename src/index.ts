@@ -157,9 +157,19 @@ class DocmostClient {
     // Say what Docmost refused and why, instead of axios's bare "Request
     // failed with status code 400". Only the path, status and Docmost's own
     // message are used; request headers (the token) never reach the text.
-    this.client.interceptors.response.use(undefined, (err) => {
+    this.client.interceptors.response.use(undefined, async (err) => {
       const status = err.response?.status;
       if (!status) return Promise.reject(err);
+      // An expired or revoked session: log in again and retry this request
+      // once. A second 401 is reported, so a bad login cannot loop.
+      const config = err.config;
+      if (status === 401 && config && !config._reloginRetried) {
+        config._reloginRetried = true;
+        this.token = null;
+        await this.login();
+        config.headers.Authorization = `Bearer ${this.token}`;
+        return this.client.request(config);
+      }
       const raw = err.response?.data?.message;
       const reason = Array.isArray(raw) ? raw.join("; ") : typeof raw === "string" ? raw : err.message;
       const path = err.config?.url ?? "request";
