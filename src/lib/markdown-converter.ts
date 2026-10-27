@@ -1,4 +1,41 @@
 /**
+ * Escape plain text so Docmost's Markdown parser (marked, GFM, with its
+ * callout and math extensions) reads it back as the same literal text:
+ * Markdown punctuation, HTML-looking text, entities, $ (inline math),
+ * bare URLs or e-mail addresses (GFM autolinks), and ":::" (the callout
+ * extension splits text at any ":::", so it is written as an entity).
+ */
+function escapeText(text: string): string {
+  return text
+    .replace(/[\\`*_[\]<>~$]/g, "\\$&")
+    .replace(/&(?=#?[a-zA-Z0-9]+;)/g, "&amp;")
+    .replace(/(https?|ftp|mailto):/gi, "$1\\:")
+    .replace(/\bwww\./gi, "www\\.")
+    .replace(/@/g, "\\@")
+    .replace(/:::/g, "&#58;::");
+}
+
+/** Escape a character that would start a block (heading, quote, list...) at a line start. */
+function escapeLineStarts(text: string): string {
+  return text.replace(
+    /^([ \t]*)([#>+=-]|\d+(?=[.)]))/gm,
+    (_m, space, marker) =>
+      /^\d/.test(marker) ? `${space}${marker}\\` : `${space}\\${marker}`,
+  );
+}
+
+/** Wrap inline code in enough backticks to hold any backticks inside it. */
+function inlineCode(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) || []).map((r) => r.length));
+  const fence = "`".repeat(longest + 1);
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${fence}${pad}${text}${pad}${fence}`;
+}
+
+const attr = (value: unknown) =>
+  String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+
+/**
  * Convert ProseMirror/TipTap JSON content to Markdown
  * Supports all Docmost-specific node types and extensions
  */
@@ -14,7 +51,7 @@ export function convertProseMirrorToMarkdown(content: any): string {
         return nodeContent.map(processNode).join("\n\n");
 
       case "paragraph":
-        const text = nodeContent.map(processNode).join("");
+        const text = escapeLineStarts(nodeContent.map(processNode).join(""));
         const align = node.attrs?.textAlign;
         if (align && align !== "left") {
           return `<div align="${align}">${text}</div>`;
@@ -27,7 +64,8 @@ export function convertProseMirrorToMarkdown(content: any): string {
         return "#".repeat(level) + " " + headingText;
 
       case "text":
-        let textContent = node.text || "";
+        const isCode = (node.marks || []).some((m: any) => m.type === "code");
+        let textContent = isCode ? node.text || "" : escapeText(node.text || "");
         // Apply marks (bold, italic, code, etc.)
         if (node.marks) {
           for (const mark of node.marks) {
@@ -39,11 +77,30 @@ export function convertProseMirrorToMarkdown(content: any): string {
                 textContent = `*${textContent}*`;
                 break;
               case "code":
-                textContent = `\`${textContent}\``;
+                textContent = inlineCode(textContent);
                 break;
-              case "link":
-                textContent = `[${textContent}](${mark.attrs?.href || ""})`;
+              case "link": {
+                const href = mark.attrs?.href || "";
+                // Internal page links and integration links carry attributes
+                // plain Markdown cannot; Docmost parses them back from HTML.
+                // So do destinations with spaces or brackets, which Markdown
+                // would percent-encode.
+                if (
+                  mark.attrs?.internal ||
+                  mark.attrs?.integrationProvider ||
+                  /[\s()<>]/.test(href)
+                ) {
+                  const extra =
+                    (mark.attrs.internal ? ` data-internal="true"` : "") +
+                    (mark.attrs.integrationProvider
+                      ? ` data-integration-provider="${attr(mark.attrs.integrationProvider)}"`
+                      : "");
+                  textContent = `<a href="${attr(href)}"${extra}>${textContent}</a>`;
+                } else {
+                  textContent = `[${textContent}](${href})`;
+                }
                 break;
+              }
               case "strike":
                 textContent = `~~${textContent}~~`;
                 break;
@@ -56,10 +113,14 @@ export function convertProseMirrorToMarkdown(content: any): string {
               case "superscript":
                 textContent = `<sup>${textContent}</sup>`;
                 break;
-              case "highlight":
+              case "highlight": {
                 const color = mark.attrs?.color || "yellow";
-                textContent = `<mark style="background-color: ${color}">${textContent}</mark>`;
+                const name = mark.attrs?.colorName
+                  ? ` data-highlight-color-name="${attr(mark.attrs.colorName)}"`
+                  : "";
+                textContent = `<mark data-color="${attr(color)}"${name} style="background-color: ${attr(color)}">${textContent}</mark>`;
                 break;
+              }
               case "textStyle":
                 if (mark.attrs?.color) {
                   textContent = `<span style="color: ${mark.attrs.color}">${textContent}</span>`;
@@ -72,20 +133,24 @@ export function convertProseMirrorToMarkdown(content: any): string {
 
       case "codeBlock":
         const language = node.attrs?.language || "";
-        const code = nodeContent.map(processNode).join("");
-        return "```" + language + "\n" + code + "\n```";
+        const code = nodeContent.map((n: any) => n.text || "").join("");
+        const longest = Math.max(0, ...(code.match(/`{3,}/g) || []).map((r: string) => r.length));
+        const fence = "`".repeat(Math.max(3, longest + 1));
+        return fence + language + "\n" + code + "\n" + fence;
 
       case "bulletList":
         return nodeContent
           .map((item: any) => processListItem(item, "-"))
           .join("\n");
 
-      case "orderedList":
+      case "orderedList": {
+        const start = Number.isInteger(node.attrs?.start) ? node.attrs.start : 1;
         return nodeContent
           .map((item: any, index: number) =>
-            processListItem(item, `${index + 1}.`),
+            processListItem(item, `${start + index}.`),
           )
           .join("\n");
+      }
 
       case "taskList":
         return nodeContent.map((item: any) => processTaskItem(item)).join("\n");
@@ -99,7 +164,12 @@ export function convertProseMirrorToMarkdown(content: any): string {
         return nodeContent.map(processNode).join("\n");
 
       case "blockquote":
-        return nodeContent.map((n: any) => "> " + processNode(n)).join("\n");
+        return nodeContent
+          .map(processNode)
+          .join("\n\n")
+          .split("\n")
+          .map((line: string) => (line ? `> ${line}` : ">"))
+          .join("\n");
 
       case "horizontalRule":
         return "---";
@@ -107,11 +177,24 @@ export function convertProseMirrorToMarkdown(content: any): string {
       case "hardBreak":
         return "\n";
 
-      case "image":
-        const imgAlt = node.attrs?.alt || "";
-        const imgSrc = node.attrs?.src || "";
-        const imgCaption = node.attrs?.caption || "";
-        return `![${imgAlt}](${imgSrc})${imgCaption ? `\n*${imgCaption}*` : ""}`;
+      case "image": {
+        // Emitted as Docmost's own <img> markup so size, alignment and the
+        // attachment reference survive a write back.
+        const a = node.attrs || {};
+        const parts = [
+          ["src", a.src],
+          ["alt", a.alt],
+          ["width", a.width],
+          ["height", a.height],
+          ["data-align", a.align],
+          ["data-attachment-id", a.attachmentId],
+          ["data-size", a.size],
+          ["data-aspect-ratio", a.aspectRatio],
+        ]
+          .filter(([, v]) => v !== null && v !== undefined && v !== "")
+          .map(([k, v]) => `${k}="${attr(v)}"`);
+        return `<img ${parts.join(" ")}>`;
+      }
 
       case "video":
         const videoSrc = node.attrs?.src || "";
@@ -133,7 +216,7 @@ export function convertProseMirrorToMarkdown(content: any): string {
 
       case "callout":
         const calloutType = node.attrs?.type || "info";
-        const calloutContent = nodeContent.map(processNode).join("\n");
+        const calloutContent = nodeContent.map(processNode).join("\n\n");
         return `:::${calloutType.toLowerCase()}\n${calloutContent}\n:::`;
 
       case "details":
