@@ -96,6 +96,34 @@ function markdownNotice(json: any, exactVia: string): string {
   );
 }
 
+/** JSON with object keys sorted, so key order never counts as a difference. */
+function canonical(value: any): string {
+  return JSON.stringify(value, (_key, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]))
+      : v,
+  );
+}
+
+/**
+ * Drop what Docmost treats as unset: null/undefined values, empty objects,
+ * and dir="auto" on the doc node (the default direction). Docmost leaves
+ * these out or fills them in depending on how content was written.
+ */
+function withoutUnset(value: any, isDoc = true): any {
+  if (Array.isArray(value)) return value.map((v) => withoutUnset(v, false));
+  if (!value || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (v === null || v === undefined) continue;
+    if (isDoc && k === "attrs" && canonical(v) === canonical({ dir: "auto" })) continue;
+    const cleaned = withoutUnset(v, false);
+    if (cleaned && typeof cleaned === "object" && !Array.isArray(cleaned) && Object.keys(cleaned).length === 0) continue;
+    out[k] = cleaned;
+  }
+  return out;
+}
+
 class DocmostClient {
   // ... [Client Implementation stays exactly the same] ...
   private client: AxiosInstance;
@@ -388,6 +416,83 @@ class DocmostClient {
       message:
         `Copied the page${childPageIds.length ? ` and ${childPageIds.length} page(s) under it` : ""}. ` +
         "To undo, delete_page the copy (newPageId).",
+      backup: backupFile,
+    };
+  }
+
+  /** This server's own pre-write backups of a page, newest first. */
+  async listPageBackups(pageId: string) {
+    const entries = await backups.list(pageId);
+    const out = [];
+    for (const e of entries) {
+      const name = e.file.split("/").pop()!;
+      let title: string | null = null;
+      try {
+        title = (await backups.read(pageId, name)).title ?? null;
+      } catch {
+        // unreadable files are still listed, without a title
+      }
+      out.push({ backup: name, capturedAt: e.capturedAt, takenBefore: e.operation, title });
+    }
+    return {
+      pageId,
+      backups: out,
+      note: "Each backup is the page as it was just before the operation named in takenBefore.",
+    };
+  }
+
+  /**
+   * Put a page's title and content back to one of its backups, writing the
+   * exact JSON. The current state is backed up first, so this can be undone
+   * by restoring that newer backup.
+   */
+  async restorePageBackup(pageId: string, backup: string, restoreTitle = true) {
+    // Read the backup before taking the new one: saving prunes old backups,
+    // and could otherwise remove the very file being restored.
+    const snapshot = await backups.read(pageId, backup);
+    const page = await this.getPageForWrite(pageId);
+    if (page.deletedAt) {
+      throw new Error(`Page ${pageId} is in the trash. restore_page it first, then restore the backup.`);
+    }
+    const backupFile = await this.backupPage(page, "pre-restore");
+
+    const content = snapshot.content ?? { type: "doc", content: [] };
+    const body: Record<string, unknown> = { pageId, content, format: "json", operation: "replace" };
+    if (restoreTitle && snapshot.title) body.title = snapshot.title;
+    await this.client.post("/pages/update", body);
+
+    // Docmost stores the write asynchronously: wait until it shows up.
+    let verified = "not confirmed";
+    const deadline = Date.now() + HEADING_ID_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const stored = (await this.getPageRaw(pageId))?.content ?? null;
+      if (canonical(stored) === canonical(content)) { verified = "exact"; break; }
+      if (canonical(withoutUnset(stored)) === canonical(withoutUnset(content))) { verified = "equivalent"; break; }
+      await sleep(400);
+    }
+
+    const moved =
+      snapshot.spaceId !== page.spaceId || (snapshot.parentPageId ?? null) !== (page.parentPageId ?? null);
+    return {
+      success: true,
+      pageId,
+      restoredFrom: { backup, capturedAt: snapshot.capturedAt, takenBefore: snapshot.operation },
+      titleRestored: !!body.title,
+      verified,
+      ...(verified === "equivalent"
+        ? { note: "Content matches the backup apart from unset default attributes Docmost leaves out." }
+        : {}),
+      ...(verified === "not confirmed"
+        ? { warning: "The restored content did not show up in time to confirm it; check the page with get_page format json." }
+        : {}),
+      ...(moved
+        ? {
+            location:
+              `The page was in space ${snapshot.spaceId} under ${snapshot.parentPageId ?? "the root"} when backed up; ` +
+              `it is now in ${page.spaceId} under ${page.parentPageId ?? "the root"}. Only title and content were restored; ` +
+              "use move_page or move_page_to_space to move it back.",
+          }
+        : {}),
       backup: backupFile,
     };
   }
@@ -1194,6 +1299,39 @@ server.registerTool(
     },
   },
   async ({ pageId, spaceId }) => jsonContent(await docmostClient.duplicatePage(pageId, spaceId)),
+);
+
+// Tool: list_page_backups
+server.registerTool(
+  "list_page_backups",
+  {
+    description:
+      "List this server's own backups of a page, newest first. One is saved " +
+      "before every change made through these tools; each is the page as it " +
+      "was just before the operation named in takenBefore. Read-only. Backups " +
+      "expire after the configured age (default 90 days).",
+    inputSchema: { pageId: z.string() },
+  },
+  async ({ pageId }) => jsonContent(await docmostClient.listPageBackups(pageId)),
+);
+
+// Tool: restore_page_backup
+server.registerTool(
+  "restore_page_backup",
+  {
+    description:
+      "Put a page's content (exact JSON) and title back to one of its backups " +
+      "from list_page_backups. The current state is backed up first, so this is " +
+      "itself reversible. Does not move the page; if it has moved since, the " +
+      "result says where it was. A page in the trash must be restore_page'd first.",
+    inputSchema: {
+      pageId: z.string(),
+      backup: z.string().describe("Backup file name from list_page_backups"),
+      restoreTitle: z.boolean().optional().describe("Also restore the title (default true)"),
+    },
+  },
+  async ({ pageId, backup, restoreTitle }) =>
+    jsonContent(await docmostClient.restorePageBackup(pageId, backup, restoreTitle ?? true)),
 );
 
 async function run() {

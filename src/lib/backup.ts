@@ -1,4 +1,4 @@
-import { chmod, mkdir, open, readdir, rename, rmdir, unlink } from "fs/promises";
+import { chmod, mkdir, open, readdir, readFile, rename, rmdir, unlink } from "fs/promises";
 import { join } from "path";
 
 /**
@@ -26,6 +26,8 @@ export interface BackupEntry {
 }
 
 const PAGE_ID = /^[0-9a-fA-F-]{8,64}$/;
+// <stamp>_<operation>.json, e.g. 2026-10-27T10-15-30-123Z_replace.json
+const BACKUP_NAME = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_[a-z-]+\.json$/;
 
 export class BackupStore {
   constructor(
@@ -99,6 +101,31 @@ export class BackupStore {
         const [stamp, operation = ""] = n.replace(/\.json$/, "").split("_");
         return { file: join(dir, n), capturedAt: unstamp(stamp), operation };
       });
+  }
+
+  /**
+   * Read one snapshot of a page by its file name, as returned by list. Only
+   * names in the exact backup format are accepted, so a name cannot reach
+   * outside the page's folder.
+   */
+  async read(pageId: string, name: string): Promise<PageSnapshot> {
+    if (!BACKUP_NAME.test(name)) {
+      throw new Error(`"${name}" is not a backup file name; use one from list_page_backups.`);
+    }
+    let text: string;
+    try {
+      text = await readFile(join(this.pageDir(pageId), name), "utf-8");
+    } catch (err: any) {
+      if (err.code === "ENOENT") {
+        throw new Error(`No backup "${name}" for page ${pageId}; it may have expired. Use list_page_backups.`);
+      }
+      throw err;
+    }
+    const snapshot = JSON.parse(text) as PageSnapshot;
+    if (snapshot.pageId !== pageId) {
+      throw new Error(`Backup "${name}" belongs to page ${snapshot.pageId}, not ${pageId}.`);
+    }
+    return snapshot;
   }
 
   /**

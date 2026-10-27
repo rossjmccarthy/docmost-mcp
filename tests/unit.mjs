@@ -22,6 +22,9 @@ const ALLOWED = new Set([
   "callout-info", "mark-highlight", "mark-text-colour", "image", "image-sized", "callout", "details",
 ]);
 
+const canonicalJson = (v) =>
+  JSON.stringify(v, (_k, x) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
+
 let failures = 0;
 let checks = 0;
 const check = async (name, fn) => {
@@ -436,6 +439,66 @@ const toolServer = async (fake, extraEnv = {}) =>
     assert.equal(other.json.spaceId, "s2");
     assert.equal(fake.requests.find((q) => q.url === "/pages/duplicate").body.spaceId, undefined);
   });
+}
+
+// list_page_backups and restore_page_backup: a page with tabs and columns
+// is damaged by a forced Markdown replace, then restored to exact JSON.
+{
+  const original = fixtures.find(([n]) => n === "tabs")[1];
+  const columns = fixtures.find(([n]) => n === "columns")[1];
+  const rich = { type: "doc", content: [...original.content, ...columns.content] };
+  const state = { title: "Rich", content: rich, deletedAt: null, spaceId: "s", parentPageId: null };
+  const fake = await fakeApi({
+    "/pages/info": () => ({ id: pageId, ...state }),
+    "/pages/update": (b) => {
+      if (b.title) state.title = b.title;
+      if (b.content !== undefined) {
+        state.content = b.format === "json" ? b.content : { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "flattened" }] }] };
+      }
+      return {};
+    },
+  });
+  // Keep only one backup per page: restoring must still work although taking
+  // the pre-restore backup prunes the one being restored.
+  const srv = await toolServer(fake, { DOCMOST_BACKUP_KEEP: "1", DOCMOST_HEADING_ID_TIMEOUT_MS: "2000" });
+  const damage = await srv.call("update_page", { pageId, title: "Damaged", content: "flattened", operation: "replace", force: true });
+  const list = await srv.call("list_page_backups", { pageId });
+  const name = list.json?.backups?.[0]?.backup;
+  const restored = await srv.call("restore_page_backup", { pageId, backup: name });
+  const traversal = await srv.call("restore_page_backup", { pageId, backup: "../../etc/passwd" });
+  const gone = await srv.call("restore_page_backup", { pageId, backup: name });
+  const after = await srv.call("list_page_backups", { pageId });
+  state.deletedAt = "2026-10-27T10:00:00Z";
+  const trashed = await srv.call("restore_page_backup", { pageId, backup: after.json.backups[0].backup });
+  srv.close();
+  fake.close();
+  await check("list_page_backups lists the backup taken before the replace", () => {
+    assert.equal(damage.ok, true, damage.text);
+    assert.equal(list.json.backups.length, 1);
+    assert.equal(list.json.backups[0].takenBefore, "replace");
+    assert.equal(list.json.backups[0].title, "Rich");
+  });
+  await check("restore_page_backup brings back tabs and columns exactly, and the title", () => {
+    assert.equal(restored.ok, true, restored.text);
+    assert.equal(restored.json.verified, "exact");
+    assert.equal(canonicalJson(state.content), canonicalJson(rich));
+    assert.equal(state.title, "Rich");
+    assert.match(restored.json.backup, /_pre-restore\.json$/);
+  });
+  await check("with keep=1 the restored backup was pruned only after it was read", () => {
+    assert.deepEqual(after.json.backups.map((b) => b.takenBefore), ["pre-restore"]);
+    assert.match(gone.text, /No backup .* may have expired/);
+  });
+  await check("restore_page_backup refuses a path instead of a backup name", () => {
+    assert.equal(traversal.ok, false);
+    assert.match(traversal.text, /not a backup file name/);
+  });
+  await check("restore_page_backup refuses a page in the trash", () => {
+    assert.equal(trashed.ok, false);
+    assert.match(trashed.text, /in the trash\. restore_page it first/);
+  });
+  await check("restore wrote exactly one JSON replace", () =>
+    assert.equal(fake.requests.filter((q) => q.url === "/pages/update" && q.body.format === "json").length, 1));
 }
 
 // Backup folders are owner-only, and the startup sweep expires old backups
