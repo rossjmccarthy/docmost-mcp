@@ -137,6 +137,19 @@ class DocmostClient {
         "Content-Type": "application/json",
       },
     });
+    // Say what Docmost refused and why, instead of axios's bare "Request
+    // failed with status code 400". Only the path, status and Docmost's own
+    // message are used; request headers (the token) never reach the text.
+    this.client.interceptors.response.use(undefined, (err) => {
+      const status = err.response?.status;
+      if (!status) return Promise.reject(err);
+      const raw = err.response?.data?.message;
+      const reason = Array.isArray(raw) ? raw.join("; ") : typeof raw === "string" ? raw : err.message;
+      const path = err.config?.url ?? "request";
+      const wrapped = new Error(`Docmost refused ${path} (HTTP ${status}): ${reason}`);
+      (wrapped as any).status = status;
+      return Promise.reject(wrapped);
+    });
   }
 
   async login() {
