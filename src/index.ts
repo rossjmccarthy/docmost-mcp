@@ -823,7 +823,7 @@ class DocmostClient {
     const { title, force = false } = options;
     const operation = options.operation ?? "replace";
     const format = options.format ?? "markdown";
-    const formatName = format === "html" ? "HTML" : "Markdown";
+    const rewrite = format === "html" ? "an HTML rewrite" : "a Markdown rewrite";
 
     // Empty or whitespace-only content means "not supplied" (title-only
     // rename), never "blank the page".
@@ -842,8 +842,8 @@ class DocmostClient {
       const findings = inspectContent(page.content, format);
       if (isLossy(findings)) {
         throw new Error(
-          `Refusing to replace page ${pageId}: it contains content that a ` +
-            `${formatName} rewrite would lose or change: ${describeFindings(findings)}. ` +
+          `Refusing to replace page ${pageId}: it contains content that ` +
+            `${rewrite} would lose or change: ${describeFindings(findings)}. ` +
             `Use operation "append" or "prepend" to add content without touching ` +
             `what is there, edit the page in Docmost, or pass force=true to ` +
             `overwrite anyway (a backup is taken first).`,

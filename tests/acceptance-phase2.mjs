@@ -171,7 +171,6 @@ try {
   check("add_page_labels with an invalid name fails with Docmost's reason", !badLabel.ok && /Docmost refused .* \(HTTP 400\)/.test(badLabel.text), badLabel.text.slice(0, 160));
   const rem = label ? await tool.call("remove_page_label", { pageId: R.id, labelId: label.id }) : { ok: false, text: "no label" };
   check("remove_page_label removes it", rem.ok && !rem.json.labels.some((l) => l.name === "mcptest"));
-  info("the label \"mcptest\" may remain defined in the workspace with no pages; remove it in Docmost if it shows up");
 
   // Backlinks: a page that mentions P.
   await apiPage("links to parent", { type: "doc", content: [{ type: "paragraph", content: [
