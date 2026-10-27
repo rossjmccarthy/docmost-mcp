@@ -607,6 +607,44 @@ const toolServer = async (fake, extraEnv = {}) =>
   });
 }
 
+// Labels and backlinks; and a Docmost refusal comes back with Docmost's
+// reason, never the token.
+{
+  let labels = [{ id: "l1", name: "medical" }];
+  const fake = await fakeApi({
+    "/pages/info": () => ({ id: pageId, spaceId: "s", title: "T", parentPageId: null, content: { type: "doc", content: [] } }),
+    "/pages/labels": () => ({ items: labels, meta: { hasNextPage: false } }),
+    "/pages/labels/add": (b) => {
+      if (b.names.some((n) => n.startsWith("~"))) throw new Error("Label names can only contain letters, numbers, hyphens, underscores, and tildes, and cannot start with a tilde");
+      labels = [...labels, ...b.names.map((n, i) => ({ id: `n${i}`, name: n }))];
+      return null;
+    },
+    "/pages/labels/remove": (b) => { labels = labels.filter((l) => l.id !== b.labelId); return null; },
+    "/pages/backlinks": (b) => ({ items: [{ id: "src", title: "Links here", spaceId: "s" }], meta: { hasNextPage: false }, direction: b.direction }),
+  });
+  const srv = await toolServer(fake);
+  const added = await srv.call("add_page_labels", { pageId, names: ["family"] });
+  const removed = await srv.call("remove_page_label", { pageId, labelId: "l1" });
+  const bad = await srv.call("add_page_labels", { pageId, names: ["~bad"] });
+  const links = await srv.call("get_backlinks", { pageId });
+  srv.close();
+  fake.close();
+  await check("add_page_labels and remove_page_label back up and return the labels after", () => {
+    assert.deepEqual(added.json.labels.map((l) => l.name), ["medical", "family"]);
+    assert.deepEqual(removed.json.labels.map((l) => l.name), ["family"]);
+    assert.match(added.json.backup, /_labels\.json$/);
+  });
+  await check("a Docmost refusal is reported with its reason and path, without the token", () => {
+    assert.equal(bad.ok, false);
+    assert.match(bad.text, /Docmost refused \/pages\/labels\/add \(HTTP 400\): Label names can only contain/);
+    assert.doesNotMatch(bad.text, /Bearer|authToken/);
+  });
+  await check("get_backlinks defaults to incoming", () => {
+    assert.deepEqual(links.json.pages, [{ id: "src", title: "Links here", spaceId: "s" }]);
+    assert.equal(fake.requests.find((q) => q.url === "/pages/backlinks").body.direction, "incoming");
+  });
+}
+
 // Backup folders are owner-only, and the startup sweep expires old backups
 // across all pages, including a page's newest once it is past the limit.
 {

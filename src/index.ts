@@ -580,6 +580,35 @@ class DocmostClient {
     };
   }
 
+  async listPageLabels(pageId: string) {
+    const labels = await this.paginateAll("/pages/labels", { pageId });
+    return labels.map((l: any) => ({ id: l.id, name: l.name }));
+  }
+
+  /** Add labels; Docmost lower-cases names and allows a-z, 0-9, - _ ~. */
+  async addPageLabels(pageId: string, names: string[]) {
+    if (!names.length) throw new Error("Pass at least one label name.");
+    const { backupFile } = await this.snapshot(pageId, "labels");
+    await this.client.post("/pages/labels/add", { pageId, names });
+    return { success: true, pageId, labels: await this.listPageLabels(pageId), backup: backupFile };
+  }
+
+  async removePageLabel(pageId: string, labelId: string) {
+    const { backupFile } = await this.snapshot(pageId, "labels");
+    await this.client.post("/pages/labels/remove", { pageId, labelId });
+    return { success: true, pageId, labels: await this.listPageLabels(pageId), backup: backupFile };
+  }
+
+  /** Pages that link to this one (incoming) or that it links to (outgoing). */
+  async getBacklinks(pageId: string, direction: "incoming" | "outgoing", cursor?: string, limit?: number) {
+    const { items, nextCursor } = await this.listOnePage("/pages/backlinks", { pageId, direction }, cursor, limit);
+    return {
+      direction,
+      pages: items.map((p: any) => ({ id: p.id, title: p.title, spaceId: p.spaceId ?? p.space?.id ?? null })),
+      nextCursor,
+    };
+  }
+
   async listSidebarPages(spaceId: string, pageId: string) {
     await this.ensureAuthenticated();
     const response = await this.client.post("/pages/sidebar-pages", {
@@ -1493,6 +1522,61 @@ server.registerTool(
     },
   },
   async ({ commentId, text }) => jsonContent(await docmostClient.replyToComment(commentId, text)),
+);
+
+// Tool: list_page_labels
+server.registerTool(
+  "list_page_labels",
+  {
+    description: "List a page's labels (id and name). Read-only.",
+    inputSchema: { pageId: z.string() },
+  },
+  async ({ pageId }) => jsonContent(await docmostClient.listPageLabels(pageId)),
+);
+
+// Tool: add_page_labels
+server.registerTool(
+  "add_page_labels",
+  {
+    description:
+      "Add labels to a page (up to 25 at once). Docmost lower-cases names; they " +
+      "may contain letters, digits, - _ and ~ (not first). Returns the page's " +
+      "labels afterwards. Does not change page content. Reversible with remove_page_label.",
+    inputSchema: {
+      pageId: z.string(),
+      names: z.array(z.string()).min(1).max(25).describe("Label names to add"),
+    },
+  },
+  async ({ pageId, names }) => jsonContent(await docmostClient.addPageLabels(pageId, names)),
+);
+
+// Tool: remove_page_label
+server.registerTool(
+  "remove_page_label",
+  {
+    description:
+      "Remove one label from a page, by label id from list_page_labels. Does not " +
+      "delete the label elsewhere or change page content. Reversible with add_page_labels.",
+    inputSchema: { pageId: z.string(), labelId: z.string() },
+  },
+  async ({ pageId, labelId }) => jsonContent(await docmostClient.removePageLabel(pageId, labelId)),
+);
+
+// Tool: get_backlinks
+server.registerTool(
+  "get_backlinks",
+  {
+    description:
+      'List the pages that link to a page (direction "incoming", the default) ' +
+      'or that it links to ("outgoing"). Read-only. Returns nextCursor when there are more.',
+    inputSchema: {
+      pageId: z.string(),
+      direction: z.enum(["incoming", "outgoing"]).optional(),
+      ...pagingSchema,
+    },
+  },
+  async ({ pageId, direction, cursor, limit }) =>
+    jsonContent(await docmostClient.getBacklinks(pageId, direction ?? "incoming", cursor, limit)),
 );
 
 async function run() {
